@@ -1,4 +1,5 @@
-"""Labores verticales: chimeneas (ascendentes / descendentes) y piques — López Jimeno (1987) cap. 23."""
+"""Labores verticales: chimeneas (ascendentes / descendentes) y piques — López Jimeno (1987) cap. 23 y
+diseño de anillos con barrenos verticales de Konya (Manual de voladura, §9.2)."""
 from __future__ import annotations
 
 import math
@@ -9,8 +10,8 @@ import pandas as pd
 from shapely import affinity
 from shapely.geometry import Point, Polygon
 
-from .common import (Explosive, Result, Rock, bmax_holmberg, bmax_langefors, colors_for, finalize_holes,
-                     new_hole, relief_row, summary_common)
+from .common import (KONYA_EQS, Explosive, Result, Rock, bmax_holmberg, bmax_langefors, colors_for,
+                     finalize_holes, konya_burden, new_hole, relief_row, summary_common)
 from .cuts import CUT_NOTES, CutCtx, make_cut
 from .facelayout import fill_helpers, uniform_contour
 
@@ -30,6 +31,7 @@ PIQUE_METHODS = [
     "Sección completa — cuele cónico",
     "Sección completa — barrenos paralelos",
     "Sección completa — barreno o chimenea central",
+    "Anillos con barrenos verticales — Konya (§9.2)",
 ]
 METHOD_NOTES = {
     CHIMENEA_METHODS[0]: "Fig. 23.10–23.11 LJ: estructura de madera como plataforma; barrenos en V o abanico; "
@@ -53,6 +55,9 @@ METHOD_NOTES = {
     PIQUE_METHODS[3]: "§2.3 y Fig. 23.4 LJ: superficies cónicas invertidas; el más usado en pozos circulares.",
     PIQUE_METHODS[4]: "§2.3 y Fig. 23.7 LJ: cuele de barrenos paralelos, perforación más sencilla.",
     PIQUE_METHODS[5]: "Fig. 23.8 LJ: barreno central de gran diámetro o chimenea como cara libre más efectiva.",
+    PIQUE_METHODS[6]: "Konya §9.2.1 (Fig. 9.4): cuña quemada central y anillos concéntricos; B de la ec. 6.2; "
+                      "N_R = R_tiro/B; S = B; N_H = 2π·R_R/S; avance L = 2B; J = 0.3B; T = 0.5B; "
+                      "ajuste 0.1 + H·tan 2°; 100–150 ms (o LP) entre anillos, en espiral hacia afuera.",
 }
 
 # Figuras 23.5 y 23.6 LJ (digitalizadas): avance y consumo específico vs superficie del pozo
@@ -274,7 +279,8 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
             P["NB_emp"] = NB_emp
         cut_type = o.cut_type
         if cut_type is None:
-            cut_type = {CHIMENEA_METHODS[0]: "En V / cuña", CHIMENEA_METHODS[1]:
+            cut_type = {PIQUE_METHODS[6]: "Cuña quemada — Konya (barreno vacío grande)",
+                        CHIMENEA_METHODS[0]: "En V / cuña", CHIMENEA_METHODS[1]:
                         "Cilíndrico 4 secciones — Holmberg (López Jimeno, con desviación)",
                         CHIMENEA_METHODS[2]: "Quemado simple", PIQUE_METHODS[2]: "En V / cuña",
                         PIQUE_METHODS[3]: "Instantáneo piramidal",
@@ -282,18 +288,42 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
                         }.get(o.method, "Quemado simple")
         L_face = Hp
         adv = Hp * o.blast_eff
+        if o.method == PIQUE_METHODS[6]:
+            De_k = exm.De_mm or o.d1_mm
+            Bk = konya_burden(De_k, exm.rho, rock.rho, KONYA_EQS[1])
+            R_sh = vs.min_dim / 2
+            NR = max(1, round(R_sh / Bk))
+            Bk_r = R_sh / NR
+            Hk = min(Hp, 2.3 * Bk_r)
+            Jk = 0.3 * Bk_r
+            FK = "2. Anillos — Konya"
+            lg.add(FK, "Bordo ideal", "B", Bk, "m", f"(6.2) 0.012·(2ρe/ρr + 1.5)·De; De = {De_k:.1f} mm")
+            lg.add(FK, "N° de anillos", "N_R", NR, "", f"(9.1) R_tiro/B = {R_sh:.2f}/{Bk:.2f}")
+            lg.add(FK, "Bordo real", "B_R", Bk_r, "m", "(9.2) R_tiro/N_R")
+            lg.add(FK, "Avance", "L", 2 * Bk_r, "m", "(9.6) 2B")
+            lg.add(FK, "Sub-barrenación", "J", Jk, "m", "(9.7) 0.3B")
+            lg.add(FK, "Profundidad del barreno", "H", Hk, "m", "L + J (limitada por la barra)")
+            lg.add(FK, "Taco", "T", 0.5 * Bk_r, "m", "(9.8) 0.5B")
+            lg.add(FK, "Ángulo de ajuste", "LO", 0.1 + Hk * math.tan(math.radians(2)), "m", "(9.9) 0.1 + H·tan 2°")
+            lg.add(FK, "Tiempo de retardo", "—", "100–150 ms o LP por anillo, en espiral hacia afuera", "", "§9.2.1.11")
+            L_face = Hk
+            adv = Hk - Jk
+            P["konya_rings"] = (NR, Bk_r, Hk, R_sh)
         if o.method in (PIQUE_METHODS[0], PIQUE_METHODS[1], PIQUE_METHODS[5]):
             cut = None
         else:
-            ctx = CutCtx(d1=d1, d2=o.d2_mm / 1000, NB=o.NB, H=Hp, F=o.F, c=c, rws=exm.rws, q_avail=q_av,
+            ctx = CutCtx(d1=d1, d2=o.d2_mm / 1000, NB=o.NB, H=L_face if "konya_rings" in P else Hp, F=o.F, c=c,
+                         rws=exm.rws, q_avail=q_av,
                          UCS=rock.UCS, width=vs.min_dim - 2 * o.offset, height=vs.min_dim - 2 * o.offset,
                          vertex_deg=2 * (90 - o.inclin_deg) if labor == "Pique" else 60.0,
-                         adv_factor=0.475 if labor == "Chimenea" else 0.6, rho_e=exm.rho)
+                         adv_factor=0.475 if labor == "Chimenea" else 0.6, rho_e=exm.rho, rho_r=rock.rho,
+                         De_mm=exm.De_mm,
+                         max_open=(1.6 * P["konya_rings"][1]) if "konya_rings" in P else None)
             cut = make_cut(cut_type, ctx)
             for row in cut.log:
                 lg.add(F1 + " — " + cut_type, *row)
             res.warnings += cut.warnings
-            if cut.advance:
+            if cut.advance and "konya_rings" not in P:
                 adv = cut.advance if labor == "Pique" else min(cut.advance, 2.0)
                 L_face = min(Hp, adv + 0.1)
             if o.method == CHIMENEA_METHODS[0]:
@@ -311,6 +341,9 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
                 if "qf" in h:
                     cargas = [(h["T"], L - h["lf"], h["qc"]), (L - h["lf"], L, h["qf"])]
                     T = h["T"]
+                elif "Tk" in h:
+                    T = min(h["Tk"], 0.5 * L)
+                    cargas = [(T, L, h.get("q", q_av))]
                 else:
                     cargas = [(Lt, L, h.get("q", q_av))]
                     T = Lt
@@ -357,7 +390,29 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
             res.sources = [(r_ * 1.0, 0.0) for r_ in np.linspace(0, R, 5)]
             vol = vs.area * adv
             lg.add(F1, "Sectores de la espiral", "n", nsec, "", "un sector por pega (los totales son por vuelta)")
-        if o.method not in (PIQUE_METHODS[0], PIQUE_METHODS[1]):
+        if o.method == PIQUE_METHODS[6]:
+            NR, Bk_r, Hk, R_sh = P["konya_rings"]
+            Tk = 0.5 * Bk_r
+            gk = math.atan((0.1 + Hk * math.tan(math.radians(2))) / Hk)
+            r_open = max(math.hypot(*xy) for xy in opening.exterior.coords) if opening is not None else 0.0
+            for k in range(1, NR + 1):
+                RR = R_sh - o.offset if k == NR else k * Bk_r
+                if RR <= r_open + 0.5 * Bk_r:
+                    continue
+                NH = max(4, math.ceil(2 * math.pi * RR / Bk_r))
+                Sr = 2 * math.pi * RR / NH
+                zona = "Contorno" if k == NR else "Destroza"
+                lg.add("2. Anillos — Konya", f"Anillo {k}: radio, N° de barrenos y espaciamiento real", "R / N_H / S",
+                       f"{RR:.2f} / {NH} / {Sr:.2f}", "m", "(9.4–9.5) N_H = 2π·R_R/S; S_real = 2π·R_R/N_H")
+                for j in range(NH):
+                    a_ = 2 * math.pi * j / NH + (math.pi / NH if k % 2 else 0.0)
+                    x, y = RR * math.cos(a_), RR * math.sin(a_)
+                    u = (math.sin(gk) * math.cos(a_), math.sin(gk) * math.sin(a_), -math.cos(gk)) if k == NR else None
+                    hole(zona, x, y, Hk, [(Tk, Hk, q_av)], Tk, Bk_r, Sr, q_av, u=u)
+                    rows[-1]["grupo"] = 4 + k
+            res.sources = [(r["x"], r["y"]) for r in rel_rows] if rel_rows else [(0.0, 0.0)]
+            vol = vs.area * adv
+        elif o.method not in (PIQUE_METHODS[0], PIQUE_METHODS[1]):
             cont, helpers = _layout_face(vs, opening, [(None, r["x"], r["y"]) for r in rows],
                                          [(r["x"], r["y"]) for r in rel_rows], B_ring, o.SB, contour_S, contour_B,
                                          o.offset)

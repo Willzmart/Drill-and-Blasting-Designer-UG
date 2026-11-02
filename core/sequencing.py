@@ -18,10 +18,11 @@ from scipy.optimize import Bounds, LinearConstraint, milp
 from scipy.sparse import lil_matrix, vstack
 from scipy.sparse.csgraph import dijkstra
 
-from .common import EXSANEL_LP, EXSANEL_MS
+from .common import EXSANEL_LP, EXSANEL_MS, FANEL_MS
 
 SYSTEMS = ["Carmex (mecha de seguridad + fulminante)", "No eléctrico — Exsanel periodo corto (MS)",
-           "No eléctrico — Exsanel periodo largo (LP)", "No eléctrico — tabla propia", "Electrónico"]
+           "No eléctrico — Exsanel periodo largo (LP)", "No eléctrico — tabla propia", "Electrónico",
+           "No eléctrico — Fanel (Famesa) periodo corto"]
 
 
 def relief_graph(h: pd.DataFrame, sources, link=1.6):
@@ -181,7 +182,8 @@ def detonator_times(period, system, cfg, cut_mask=None, min_gap_ms=0.0):
     if system == "Electrónico":
         tmap = {k: cfg["t0"] + (k - 1) * cfg["dt_ms"] for k in per}
         return np.array([tmap[k] for k in p]), np.array(p)
-    tab = EXSANEL_MS if "MS" in system else EXSANEL_LP if "LP" in system else list(cfg["table"])
+    tab = FANEL_MS if "Fanel" in system else EXSANEL_MS if "MS" in system else EXSANEL_LP if "LP" in system \
+        else list(cfg["table"])
     cut_per = set(p[cut_mask]) if cut_mask is not None else set()
     tmap, nmap = {}, {}
     idx, t_prev = -1, -1e9

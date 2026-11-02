@@ -1,12 +1,14 @@
 """Diseño de mallas de perforación y voladura subterránea — avance, chimeneas, piques y producción.
 
-Fuentes: Carpio Chávez (2025) y López Jimeno et al. (IGME, 1987).
+Fuentes: Carpio Chávez (2025), López Jimeno et al. (IGME, 1987), Konya (Manual de voladura), material del
+curso de taladros largos (Llontop; Salas), Guía del explosivista de Enaex y papers de voladura en anillos.
 Ejecutar:  streamlit run app.py
 """
 from __future__ import annotations
 
 import io
 import json
+import math
 import pickle
 from pathlib import Path
 
@@ -15,14 +17,17 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 
+from core import energy as en
 from core import fragmentation as fr
+from core import report
 from core import sequencing as sq
 from core import viz
-from core.avance import CHARGE_METHODS, AvanceOptions, Drill, run_avance
-from core.common import (CARTRIDGES, EXPLOSIVES, EXSANEL_LP, EXSANEL_MS, P80_REFERENCIAS, Rock, make_explosive,
-                         ms_por_metro)
+from core import viz_energy as ve
+from core.avance import CHARGE_METHODS, DESIGNS, AvanceOptions, Drill, run_avance
+from core.common import (CARTRIDGES, EXPLOSIVES, EXSANEL_LP, EXSANEL_MS, FANEL_MS, KONYA_EQS, KONYA_KD, KONYA_KR,
+                         KONYA_KS, P80_REFERENCIAS, Rock, make_explosive, ms_por_metro)
 from core.cuts import ANGLED_CUTS, CUT_NOTES, CUT_TYPES, PARALLEL_CUTS
-from core.produccion import CE0_TABLE, CRITERIA, DEFAULTS, PROD_METHODS, ProdOptions, run_produccion
+from core.produccion import CE0_TABLE, CRITERIA, DEFAULTS, FAN_STEMMING, PROD_METHODS, ProdOptions, run_produccion
 from core.sections import GALLERY_TYPES, PRESETS, VERTICAL_TYPES, build_section, build_vertical_section
 from core.vertical import CHIMENEA_METHODS, PIQUE_METHODS, VerticalOptions, run_vertical
 
@@ -32,6 +37,7 @@ ss = st.session_state
 ss.setdefault("overrides", {})
 ss.setdefault("seq", None)
 ss.setdefault("seq_sig", None)
+ss.setdefault("emem", {})
 
 # =============================================================================
 # BARRA LATERAL
@@ -47,7 +53,8 @@ def explosive_picker(label, default, cart_default, key, allow_bulk=True):
         c1, c2 = st.columns(2)
         custom = dict(name="Personalizado", vod=c1.number_input("VOD (m/s)", 1500, 8000, 5000, key=key + "v"),
                       rho=c2.number_input("Densidad (g/cm³)", 0.6, 1.6, 1.10, key=key + "r"),
-                      rws=c1.number_input("RWS (% ANFO)", 40, 180, 90, key=key + "w") / 100)
+                      rws=c1.number_input("RWS (% ANFO)", 40, 180, 90, key=key + "w") / 100,
+                      E_MJkg=c2.number_input("Energía (MJ/kg; 0 = RWS·3.82)", 0.0, 8.0, 0.0, 0.05, key=key + "e"))
         bulk = c2.checkbox("A granel", False, key=key + "g")
         if bulk:
             custom.update(cart="granel", w_cart=0.0, L_cart=1.0, granel=True)
@@ -56,9 +63,13 @@ def explosive_picker(label, default, cart_default, key, allow_bulk=True):
                           L_cart=c2.number_input("Long. cartucho (m)", 0.1, 0.8, 0.3048, key=key + "l"), granel=False)
         return make_explosive("Personalizado", custom=custom)
     if EXPLOSIVES[name]["granel"]:
-        return make_explosive(name)
-    cart = st.selectbox("Cartucho", list(CARTRIDGES), index=list(CARTRIDGES).index(cart_default), key=key + "k")
-    return make_explosive(name, cart)
+        ex = make_explosive(name)
+    else:
+        cart = st.selectbox("Cartucho", list(CARTRIDGES), index=list(CARTRIDGES).index(cart_default), key=key + "k")
+        ex = make_explosive(name, cart)
+    st.caption(f"ρ = {ex.rho:.2f} g/cm³ · VOD = {ex.vod:.0f} m/s · RWS = {ex.rws * 100:.0f} % · "
+               f"energía ≈ {ex.energy:.2f} MJ/kg")
+    return ex
 
 
 with st.sidebar.expander("Macizo rocoso", expanded=False):
@@ -72,7 +83,12 @@ with st.sidebar.expander("Macizo rocoso", expanded=False):
     Emod = c1.number_input("E (GPa)", 1.0, 120.0, 35.0)
     jsf_auto = 1.0 if RMR > 60 else 0.9 if RMR > 40 else 0.8 if RMR > 20 else 0.7
     JSF = c2.number_input("JSF", 0.5, 1.0, jsf_auto, 0.05, help="Carpio Tabla 01: 1.0 / 0.9 / 0.8 / 0.7")
-rock = Rock(RMR=RMR, GSI=GSI, RQD=RQD, UCS=UCS, rho=rho_r, Q=Qb, JSF=JSF, E=Emod)
+    sig_t = c1.number_input("σt tracción (MPa)", 0.5, 40.0, round(UCS / 10, 1), 0.5,
+                            help="Por defecto σci/10. Se usa en Torbica y Lapcevic, Pearse del curso y la VPP crítica.")
+    nu = c2.number_input("Poisson ν", 0.05, 0.45, 0.25, 0.01)
+    vp_m = st.number_input("Vp medida (m/s; 0 = estimar con Q)", 0.0, 7000.0, 0.0, 50.0)
+rock = Rock(RMR=RMR, GSI=GSI, RQD=RQD, UCS=UCS, rho=rho_r, Q=Qb, JSF=JSF, E=Emod, sigma_t=sig_t, nu=nu,
+            Vp_user=vp_m or None)
 
 with st.sidebar.expander("Iniciación", expanded=False):
     system = st.selectbox("Sistema de iniciación", sq.SYSTEMS, index=2 if labor != "Producción" else 4)
@@ -105,8 +121,13 @@ try:
             if A < 1.5 or Hs < 1.5:
                 st.warning("Sección menor a 1.5 × 1.5 m: revise el estándar de sostenimiento y evacuación.")
         with st.sidebar.expander("Cuele", expanded=True):
-            default_cut = "Quemado simple" if narrow else CUT_TYPES[0]
-            cut_type = st.selectbox("Tipo de cuele", CUT_TYPES, index=CUT_TYPES.index(default_cut))
+            design = st.radio("Criterio de diseño de la malla", DESIGNS,
+                              help="Konya: B = 0.012·(2ρe/ρr + 1.5)·De; auxiliares S = 1.1B, T = 0.5B; piso T = 0.2B; "
+                                   "recorte S = 0.45–0.60 m, B = 1.3S, q = D²/12 g/m; look-out 0.1 + H·tan 2°.")
+            default_cut = "Quemado simple" if narrow else (
+                "Cuña quemada — Konya (barreno vacío grande)" if design.startswith("Konya") else CUT_TYPES[0])
+            cut_type = st.selectbox("Tipo de cuele", CUT_TYPES, index=CUT_TYPES.index(default_cut),
+                                    key=f"cut{design[:3]}{narrow}")
             st.caption(CUT_NOTES.get(cut_type, ""))
             cut_method, cut_factor, n_quad, burn_sp = "Holmberg", 1.7, None, None
             vertex, advf, dcr, Et, dlo = 60.0, 0.475, 200.0, 1.5, 0.5
@@ -145,6 +166,10 @@ try:
             exm = explosive_picker("Explosivo principal", "Emulnor 1000", '7/8" x 7"' if narrow else '1 1/4" x 12"', "am")
             exc = explosive_picker("Explosivo de corona", "Emulnor 500", '1" x 12"', "ac")
             charge_method = st.selectbox("Método de carga", CHARGE_METHODS)
+            atac = st.number_input("Factor de atacado del cartucho", 0.6, 1.0, 1.0, 0.05,
+                                   help="Longitud que ocupa el cartucho atacado / longitud nominal. Las plantillas del "
+                                        "curso usan 0.8 (el cartucho se comprime y aumenta la carga por metro).")
+            exm.atacado = exc.atacado = atac
         with st.sidebar.expander("Contorno y otros", expanded=False):
             contour_mode = st.selectbox("Contorno", ["Voladura controlada (S = K·Ø1, q = 90·Ø1²)",
                                                      "Sin voladura controlada (f = 1.2, S/B = 1.25)"],
@@ -165,9 +190,15 @@ try:
                              burn_spacing=burn_sp, vertex_deg=vertex, adv_factor=advf, d_crater_mm=dcr, Et=Et,
                              delta_o=dlo, gamma_deg=gamma, K_corona=Kc, contour_mode=contour_mode, c_hat_rule=c_rule,
                              contour_offset=offset, cut_height=cut_h, blast_eff=beff, charge_method=charge_method,
-                             narrow=narrow, B_prod_override=ov[0], SB_prod=ov[1] or 1.25)
+                             narrow=narrow, B_prod_override=ov[0], SB_prod=ov[1] or (1.1 if design.startswith("Konya") else 1.25),
+                             design=design)
         res = run_avance(section, rock, drill, exm, exc, opts, cost)
         main_exp = exm
+        used_exps = [exm, exc]
+        pdf_params = [("Sección", f"{kind} {A:.2f} × {Hs:.2f} m"), ("Criterio de diseño", design),
+                      ("Cuele", cut_type), ("Ø producción / vacío", f"{d1:.0f} / {d2:.0f} mm × {int(NB)}"),
+                      ("Barra · eficiencia", f"{bar_ft:.1f} pies · {eff} %"), ("Explosivo", exm.label()),
+                      ("Explosivo de corona", exc.label()), ("Método de carga", charge_method), ("Contorno", contour_mode)]
     elif labor in ("Chimenea", "Pique"):
         methods = CHIMENEA_METHODS if labor == "Chimenea" else PIQUE_METHODS
         with st.sidebar.expander("Sección y método", expanded=True):
@@ -218,6 +249,10 @@ try:
                              SB=ov[1] or 1.25)
         res = run_vertical(labor, vs, rock, vexp, vo, cost)
         main_exp = vexp
+        used_exps = [vexp]
+        pdf_params = [("Método", method), ("Sección", f"{vkind} {a:.2f} × {b:.2f} m"),
+                      ("Ø producción / vacío", f"{vd1:.0f} / {vd2:.0f} mm × {int(vNB)}"), ("Barra", f"{vbar:.1f} pies"),
+                      ("Explosivo", vexp.label()), ("Contorno", contour)]
     else:
         with st.sidebar.expander("Método de explotación", expanded=True):
             method = st.selectbox("Método", PROD_METHODS)
@@ -269,6 +304,24 @@ try:
             if method == PROD_METHODS[8]:
                 po.phase_h = st.number_input("Altura de cada banco (m)", 2.0, 20.0, 8.0, 0.5)
                 po.orient_h = st.radio("Banqueo", ["Vertical (50–65 mm)", "Horizontal (32–45 mm)"]) .startswith("Horiz")
+            if method == PROD_METHODS[2]:
+                po.fan_stem = st.selectbox("Retacado de los anillos", FAN_STEMMING)
+        if criterion.startswith("Konya"):
+            with st.sidebar.expander("Konya: ecuación y correcciones", expanded=True):
+                po.konya_eq = st.selectbox("Ecuación del burden", KONYA_EQS)
+                if "6.3" in po.konya_eq:
+                    po.stv = st.number_input("Potencia relativa por volumen Stv (ANFO = 100)", 50.0, 250.0, 100.0, 5.0)
+                po.Kd = KONYA_KD[st.selectbox("Kd — orientación de los estratos (Tabla 6.3)", list(KONYA_KD), index=2)]
+                po.Ks = KONYA_KS[st.selectbox("Ks — estructura geológica (Tabla 6.4)", list(KONYA_KS), index=1)]
+                po.Kr = KONYA_KR[st.selectbox("Kr — número de hileras (Tabla 6.2)", list(KONYA_KR), index=0)]
+                po.konya_delayed = st.radio("Iniciación entre taladros de una fila", ["Retardada", "Instantánea"],
+                                            horizontal=True) == "Retardada"
+                po.konya_S = st.checkbox("Espaciamiento por la relación de rigidez L/B (ecs. 7.1–7.4)", True)
+                st.caption("Taco T = 0.7·B (ec. 6.4); sobreperforación J = 0.3·B (ec. 6.6) en bancos.")
+        elif criterion.startswith("Ash"):
+            with st.sidebar.expander("Ash", expanded=True):
+                po.Kb = st.number_input("Constante Kb", 15.0, 45.0, 30.0, 1.0,
+                                        help="Plantilla del curso: 25 (ANFO) y 30 (emulsión).")
         with st.sidebar.expander("Parámetros del esquema", expanded=False):
             c1, c2 = st.columns(2)
             fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
@@ -292,6 +345,11 @@ try:
             po.SB = ov[1]
         res = run_produccion(rock, pexp, po, cost)
         main_exp = pexp
+        used_exps = [pexp]
+        pdf_params = [("Método", method), ("Criterio de burden", criterion), ("Ø perforación", f"{po.D_mm:.0f} mm"),
+                      ("Geometría (largo · ancho · alto)", f"{po.length:.1f} · {po.width:.1f} · {po.height:.1f} m"),
+                      ("Explosivo", pexp.label()), ("Filas por voladura", po.rows_blast),
+                      ("Desviación · emboquille", f"{po.alpha * 100:.1f} % · {po.e_coll:.2f} m")]
 except Exception as e:  # noqa: BLE001
     err = e
 
@@ -328,8 +386,9 @@ if ss.overrides.get(key, (None, None))[0]:
 for w in dict.fromkeys(res.warnings):
     st.warning(w)
 
-tabs = st.tabs(["Memoria de cálculo", "Fragmentación (P80)", "Vista 2D", "Vista 3D y carguío", "Secuenciamiento",
-                "Resumen y exportación"])
+tabs = st.tabs(["Memoria de cálculo", "Fragmentación (P80)", "Vista 2D", "Vista 3D y carguío", "Energía",
+                "Secuenciamiento", "Resumen y exportación"])
+emap = {e.label(): e.energy for e in used_exps}
 
 # =============================================================================
 with tabs[0]:
@@ -351,6 +410,12 @@ with tabs[0]:
     for fase in log.Fase.unique():
         with st.expander(fase, expanded=True):
             st.dataframe(log[log.Fase == fase].drop(columns="Fase"), hide_index=True, width="stretch")
+    if res.p.get("burden_table") is not None:
+        with st.expander("Comparación de criterios de burden (mismo Ø y explosivo)", expanded=False):
+            st.dataframe(res.p["burden_table"].round(3), hide_index=True, width="stretch")
+            st.caption("Konya, Ash, Torbica y Lapcevic, Pearse (PD de Cook) y McKenzie/Andersen: curso de taladros "
+                       "largos; Rustan: Onederra y Chitombo (2007). Úselos como primera aproximación y valide con "
+                       "pruebas de campo (Konya: ±10 %).")
     st.subheader("Distribución por zona")
     zt = H.groupby("zona", sort=False).agg(N=("id", "count"), B_m=("B", "mean"), S_m=("S", "mean"),
                                           L_m=("L", "mean"), kg_tal=("kg", "mean"), kg=("kg", "sum"))
@@ -377,6 +442,20 @@ with tabs[1]:
                                 float(min(max(0.1, 0.4 * B_lim), B_lim - 0.1)), 0.05)
         best_B = best_SB = None
         if route.startswith("Ruta A"):
+            c1, c2 = st.columns(2)
+            fmodel = c1.radio("Distribución", ["Kuz-Ram (Rosin-Rammler)", "KCO (Swebrec, Ouchterlony 2005)"],
+                              horizontal=True, help="KCO corrige la subestimación de finos de Kuz-Ram (paper "
+                                                    "'Comparative analysis of rock fragmentation models').")
+            xmax_in = None
+            if fmodel.startswith("KCO"):
+                xmax_in = c2.number_input("Tamaño máximo in situ x_max (cm; 0 = mín(B, S))", 0.0, 500.0, 0.0, 5.0) or None
+            with st.expander("Exponentes de Kuznetsov (calibración local)", expanded=False):
+                st.caption("X50 = A·K^(−e₁)·Q^(e₂)·(115/RWS)^(e₃). Valores clásicos 0.8, 1/6 y 19/30; el paper "
+                           "'Reparametrización de la ecuación de Kuznetsov' ajusta estos exponentes con datos de mina.")
+                cc = st.columns(3)
+                ea = cc[0].number_input("e₁", 0.3, 1.5, 0.8, 0.01)
+                eb = cc[1].number_input("e₂", 0.0, 0.6, round(1 / 6, 4), 0.01)
+                ec = cc[2].number_input("e₃", 0.2, 1.2, round(19 / 30, 4), 0.01)
             with st.expander("Factor de roca A (Lilly)", expanded=False):
                 mode = st.radio("Cálculo de A", ["Lilly", "Valor directo"], horizontal=True)
                 if mode == "Lilly":
@@ -392,9 +471,11 @@ with tabs[1]:
                 pass
             k = fr.KuzRamInput(A=Arf, q=fp["q"], Lc=fp["Lc"], H=fp["H"], d_mm=fp["d_mm"], W=fp["W"],
                                rws_pct=fp["rws"], SB=SB_now, K_ref=fp.get("K_override"),
-                               B_ref=fp["B"] if fp.get("K_override") else None)
+                               B_ref=fp["B"] if fp.get("K_override") else None,
+                               model="KCO" if fmodel.startswith("KCO") else "Kuz-Ram", xmax_cm=xmax_in, ea=ea, eb=eb,
+                               ec=ec)
             cur = fr.kuzram(fp["B"], k, fp["S"])
-            p100 = fr.size_at(cur["X50"], cur["n"], 99)
+            p100 = fr.size_model(cur, 99)
             c = st.columns(6)
             c[0].metric("B actual", f"{fp['B']:.2f} m")
             c[1].metric("K", f"{cur['K']:.2f} kg/m³")
@@ -408,9 +489,14 @@ with tabs[1]:
                 (st.success if ok else st.error)(
                     f"Verificación de atascos: P99 = {p100:.0f} cm {'≤' if ok else '>'} dimensión mínima / "
                     f"{fp['ratio']:.0f} = {lim:.0f} cm.")
-            st.latex(r"X_{50}=A\,K^{-0.8}Q^{1/6}\left(\tfrac{115}{RWS}\right)^{19/30}\;\;"
-                     r"n=\left(2.2-14\tfrac{B}{d}\right)\sqrt{\tfrac{1+S/B}{2}}\left(1-\tfrac{W}{B}\right)\tfrac{L_c}{H}"
-                     r"\;\;P_{80}=X_{50}\left(\tfrac{\ln 5}{\ln 2}\right)^{1/n}")
+            st.latex(r"X_{50}=A\,K^{-e_1}Q^{e_2}\left(\tfrac{115}{RWS}\right)^{e_3}\;\;"
+                     r"n=\left(2.2-14\tfrac{B}{d}\right)\sqrt{\tfrac{1+S/B}{2}}\left(1-\tfrac{W}{B}\right)\tfrac{L_c}{H}")
+            if cur.get("model") == "KCO":
+                st.latex(r"P(x)=\frac{1}{1+\left[\ln(x_{max}/x)/\ln(x_{max}/X_{50})\right]^{b}},\quad "
+                         r"b=2\ln 2\,\ln(x_{max}/X_{50})\,n")
+                st.caption(f"x_max = {cur['xmax']:.0f} cm · b = {cur['b']:.2f}")
+            else:
+                st.latex(r"P_{80}=X_{50}\left(\tfrac{\ln 5}{\ln 2}\right)^{1/n}")
             if res.p.get("fan_note"):
                 st.caption(res.p["fan_note"])
             opt_r, curve = fr.optimize_burden_kuzram(k, P80_t, B_min, B_lim)
@@ -429,7 +515,7 @@ with tabs[1]:
             g1.plotly_chart(f1, width="stretch")
             f2 = go.Figure()
             for lab, rr, col in [("Actual", cur, "#888"), ("Óptimo", opt_r, "#c2416f")]:
-                x, R = fr.rosin_rammler_curve(rr["X50"], rr["n"], xmax=max(cur["P80"], opt_r["P80"]) * 2.2)
+                x, R = fr.model_curve(rr, xmax=max(cur["P80"], opt_r["P80"]) * 2.2)
                 f2.add_trace(go.Scatter(x=x, y=R, name=f"{lab}: P80 = {rr['P80']:.1f} cm", line=dict(color=col, width=3)))
             f2.add_hline(y=80, line=dict(dash="dot"))
             f2.update_layout(height=360, xaxis_title="Tamaño (cm)", yaxis_title="% pasante", plot_bgcolor="white",
@@ -525,6 +611,104 @@ with tabs[3]:
 
 # =============================================================================
 with tabs[4]:
+    st.markdown("Energía de cada taladro y su distribución en el macizo. La concentración 3D de explosivo sigue a "
+                "**Kleine (1988)** como la presentan **Onederra y Chitombo (2007)** —es la base de los planos de energía "
+                "de JKSimBlast/2D Ring que pide el curso—; la PPV de campo cercano es la de **Holmberg y Persson (1980)**.")
+    etab = en.hole_energy_table(res, emap, main_exp.energy, rock.rho)
+    vol_s = S.get("Volumen roto (m³)", np.nan)
+    c = st.columns(4)
+    c[0].metric("Energía total de la malla", f"{etab.E_MJ.sum():,.0f} MJ")
+    c[1].metric("Energía media por taladro", f"{etab.E_MJ.mean():.1f} MJ")
+    c[2].metric("Energía lineal media", f"{etab.E_lineal_MJm.mean():.2f} MJ/m")
+    c[3].metric("Factor de energía (voladura)",
+                f"{S['Explosivo total (kg)'] * main_exp.energy / (vol_s * rock.rho):.2f} MJ/t" if vol_s == vol_s else "—")
+    g1, g2 = st.columns([1.25, 1])
+    g1.plotly_chart(ve.energy_bars(etab, res.zone_colors), width="stretch")
+    g2.dataframe(etab.round(3), hide_index=True, width="stretch", height=360)
+    st.divider()
+    scope = "voladura"
+    if labor == "Producción" and not res.p.get("blast_all"):
+        scope = st.radio("Taladros considerados", ["voladura", "malla"], horizontal=True,
+                         format_func={"voladura": f"Una voladura ({res.p.get('rows_blast', 1)} fila(s) o anillo(s))",
+                                      "malla": "Toda la malla dibujada"}.get,
+                         help="La concentración de Kleine suma todas las cargas: con toda la malla crece con el tamaño "
+                              "del patrón. Onederra la evalúa sobre el anillo o la voladura.")
+    seg = en.segments(res, emap, main_exp.energy, en.blast_holes(res, scope))
+    frame = en.plane_frame(res)
+    c1, c2, c3 = st.columns([1.3, 1, 1])
+    field = c1.radio("Variable", ["Concentración de explosivo (kg/t)", "Concentración de energía (MJ/t)",
+                                  "Factor de carga 3D (kg/m³)", "PPV de campo cercano — Holmberg–Persson (mm/s)"])
+    pos = c2.slider(frame["name"] + " (m)", float(frame["lo"]), float(frame["hi"]), float(frame["default"]),
+                    float(max((frame["hi"] - frame["lo"]) / 100, 0.01)))
+    res_n = c3.select_slider("Resolución", [80, 110, 140, 180], value=110)
+    thr = []
+    pf_kgt = S["Factor de carga (g/t)"] / 1000 if S.get("Factor de carga (g/t)") == S.get("Factor de carga (g/t)") else 0.5
+    if field.startswith("PPV"):
+        cc = st.columns(4)
+        Khp = cc[0].number_input("K (H–P)", 50.0, 2000.0, 700.0, 10.0, help="Holmberg–Persson: K = 700, α = 0.7 (roca "
+                                                                           "dura sueca); la plantilla del curso usa K = 470, α = 0.94.")
+        ahp = cc[1].number_input("α (H–P)", 0.3, 1.5, 0.7, 0.01)
+        ppvc = rock.ppv_crit
+        cc[2].metric("VPP crítica = σt·Vp/E", f"{ppvc:,.0f} mm/s")
+        brk = cc[3].number_input("Umbral de rotura (mm/s)", 100.0, 20000.0, float(round(4 * ppvc, -1)), 50.0,
+                                 help="Plantilla del curso: ≈ 4 × VPP crítica.")
+        thr = [(ppvc, "Inicio de daño", "#1f3b73"), (brk, "Rotura", "#2ca02c")]
+        unit, title = "mm/s", "PPV de Holmberg–Persson (envolvente)"
+    else:
+        unit = {"Concentración de explosivo (kg/t)": "kg/t", "Concentración de energía (MJ/t)": "MJ/t",
+                "Factor de carga 3D (kg/m³)": "kg/m³"}[field]
+        base = {"kg/t": pf_kgt, "MJ/t": pf_kgt * main_exp.energy, "kg/m³": pf_kgt * rock.rho}[unit]
+        tv = st.number_input(f"Umbral a resaltar ({unit})", 0.001, 1000.0, float(round(base, 3)), float(round(base / 20, 4) or 0.01),
+                             help="Por defecto, el factor de carga del diseño. Onederra y Chitombo: rotura en el pie de "
+                                  "los anillos con 0.25–0.35 kg/t.")
+        thr = [(tv, "Umbral", "#1f3b73")]
+        title = field.split(" (")[0]
+    ekey = (sig, scope, field, round(pos, 3), res_n, tuple(round(t[0], 4) for t in thr),
+            (Khp, ahp) if field.startswith("PPV") else None)
+    if ekey not in ss.emem:
+        uu, vv, PP = en.plane_grid(res, frame, pos, nx=res_n)
+        if field.startswith("PPV"):
+            F = en.hp_ppv(PP, seg, Khp, ahp)
+        else:
+            F = en.kleine(PP, seg, rock.rho, energy=(unit == "MJ/t")) * (rock.rho if unit == "kg/m³" else 1.0)
+        if len(ss.emem) > 12:
+            ss.emem.clear()
+        ss.emem[ekey] = (uu, vv, F)
+    uu, vv, F = ss.emem[ekey]
+    vmax = None if field.startswith("PPV") else float(min(np.nanpercentile(F, 97), 4 * thr[0][0]))
+    st.plotly_chart(ve.energy_map_2d(res, uu, vv, F, frame, pos, title, unit, thr, vmax=vmax,
+                                     log=field.startswith("PPV")), width="stretch")
+    view_ax = (0, 2) if res.labor == "Avance" else ((0, 1) if (res.labor in ("Chimenea", "Pique") or
+                                                               res.view2d.get("kind") == "plan") else (1, 2))
+    ss.energy_last = dict(uu=uu, vv=vv, F=F, title=f"{title} — {frame['name']} = {pos:.2f} m", unit=unit,
+                          thresholds=[(t[0], t[1], t[2]) for t in thr], labels=frame["labels"], vmax=vmax,
+                          outline=res.view2d.get("outline") if frame["axes"] == view_ax else None, sig=sig)
+    within = (F >= thr[0][0]).mean() * 100
+    if field.startswith("PPV"):
+        st.caption(f"{within:.0f} % del plano supera la VPP crítica y {(F >= thr[-1][0]).mean() * 100:.0f} % el umbral "
+                   "de rotura. Se grafica la envolvente de la PPV de cada taladro (salen en retardos distintos). Calibre "
+                   "K y α con monitoreos de campo cercano.")
+    else:
+        st.caption(f"{within:.0f} % del plano supera el umbral de {thr[0][0]:.3g} {unit}. El valor es una concentración "
+                   "equivalente a una esfera centrada en cada elemento de carga (Kleine): en el plano del burden se "
+                   "aproxima al factor de carga. No considera los tiempos de retardo (análisis estático 3D).")
+    st.subheader("Vista 3D de la energía")
+    c1, c2 = st.columns(2)
+    show_iso = c1.checkbox("Mostrar la zona que supera el umbral (isosuperficie)", False)
+    iso = None
+    if show_iso:
+        ikey = ("iso", sig, scope, field, tuple(round(t[0], 4) for t in thr))
+        if ikey not in ss.emem:
+            X, Y, Z, PV = en.volume_grid(seg, n=26)
+            FV = (en.hp_ppv(PV, seg, Khp, ahp) if field.startswith("PPV")
+                  else en.kleine(PV, seg, rock.rho, energy=(unit == "MJ/t")) * (rock.rho if unit == "kg/m³" else 1.0))
+            ss.emem[ikey] = (X, Y, Z, FV)
+        X, Y, Z, FV = ss.emem[ikey]
+        iso = (X, Y, Z, FV, thr[-1][0], unit)
+    st.plotly_chart(ve.energy_3d(res, seg, iso, c2.checkbox("Contorno de la labor", True)), width="stretch")
+
+# =============================================================================
+with tabs[5]:
     prod = labor == "Producción"
     c1, c2, c3 = st.columns(3)
     with c1:
@@ -563,8 +747,8 @@ with tabs[4]:
             txt = st.text_area("Tiempos (ms)", ", ".join(str(t) for t in EXSANEL_LP))
             cfg["table"] = [float(t) for t in txt.replace(";", ",").split(",") if t.strip()]
         else:
-            st.dataframe(pd.DataFrame({"N°": range(1, 21), "MS (ms)": EXSANEL_MS, "LP (ms)": EXSANEL_LP}),
-                         hide_index=True, height=200)
+            st.dataframe(pd.DataFrame({"N°": range(1, 21), "Exsanel MS": EXSANEL_MS, "Exsanel LP": EXSANEL_LP,
+                                       "Fanel MS": FANEL_MS}), hide_index=True, height=200)
         if not prod and not system.startswith(("Carmex", "Electrónico")):
             carpio_gap = st.checkbox(f"Tiempo mínimo entre taladros del arranque (Carpio Tabla 04: "
                                      f"{cfg['ms_m']} ms/m × L)", True)
@@ -609,6 +793,24 @@ with tabs[4]:
         st.dataframe(seq[cols].round(3), hide_index=True, width="stretch")
         st.download_button("Descargar secuencia (CSV)", seq[cols].to_csv(index=False).encode("utf-8"),
                            "secuencia.csv", "text/csv")
+        with st.expander("Daño al macizo: VPP crítica y ley de Devine (curso de taladros largos)"):
+            c1, c2, c3 = st.columns(3)
+            Kd_ = c1.number_input("K (Devine)", 10.0, 5000.0, 420.14, 1.0, key="kdev",
+                                  help="PPV = K·(D/√Q)^(−α). Plantilla del curso (Ejemplo 3): K = 420.14, α = 2.081.")
+            ad_ = c2.number_input("α (Devine)", 0.5, 3.5, 2.081, 0.01, key="adev")
+            ppv_c = c3.number_input("VPP crítica (mm/s)", 10.0, 20000.0, float(round(rock.ppv_crit, 0)), 10.0,
+                                    help="σt·Vp/E con los datos del macizo (barra lateral).")
+            Qd = float(per_delay.max())
+            Ddam = math.sqrt(Qd) * (Kd_ / ppv_c) ** (1 / ad_)
+            st.write(f"Con Q = {Qd:.1f} kg por retardo, la PPV supera la VPP crítica ({ppv_c:,.0f} mm/s) hasta "
+                     f"**{Ddam:.2f} m** del disparo; a 4 × VPP crítica (rotura) hasta "
+                     f"**{math.sqrt(Qd) * (Kd_ / (4 * ppv_c)) ** (1 / ad_):.2f} m**.")
+            dd = np.linspace(max(0.3, 0.1 * Ddam), max(4 * Ddam, 5), 60)
+            figd = go.Figure(go.Scatter(x=dd, y=Kd_ * (dd / math.sqrt(Qd)) ** (-ad_), name="PPV"))
+            figd.add_hline(y=ppv_c, line=dict(dash="dash", color="#d62728"), annotation_text="VPP crítica")
+            figd.update_layout(height=280, xaxis_title="Distancia (m)", yaxis_title="PPV (mm/s)", yaxis_type="log",
+                               plot_bgcolor="white", margin=dict(l=10, r=10, t=20, b=10))
+            st.plotly_chart(figd, width="stretch")
         with st.expander("Daño al shotcrete (Carpio cap. V)"):
             c1, c2, c3 = st.columns(3)
             fc = c1.number_input("f'c del shotcrete (MPa)", 10.0, 60.0, 23.5, 0.5)
@@ -620,7 +822,7 @@ with tabs[4]:
                      f"con Q = {Qd:.1f} kg por retardo, el shotcrete se daña hasta **d = {r_sh['d']:.2f} m** del disparo.")
 
 # =============================================================================
-with tabs[5]:
+with tabs[6]:
     c1, c2 = st.columns([1, 1.2])
     with c1:
         st.subheader("Indicadores")
@@ -641,3 +843,25 @@ with tabs[5]:
                                                       "resumen": {k: float(v) for k, v in S.items()}},
                                                      ensure_ascii=False, indent=2).encode("utf-8"),
                         "resumen.json", "application/json")
+    st.divider()
+    st.subheader("Exportar el diseño a PDF")
+    st.caption("Plano acotado de la malla con el origen de coordenadas, columnas de carga por zona, mapa de energía y "
+               "cuadro de taladros (ubicación, orientación, longitud, taco, carga, explosivo y retardo).")
+    c1, c2, c3 = st.columns(3)
+    info = dict(proyecto=c1.text_input("Proyecto", "Diseño de perforación y voladura"),
+                mina=c2.text_input("Mina / unidad", ""), responsable=c3.text_input("Elaborado por", ""),
+                revisor=c1.text_input("Revisado por", ""), labor=labor,
+                observaciones=c2.text_input("Observaciones", ""))
+    inc_e = c3.checkbox("Incluir el mapa de energía (pestaña Energía)", True)
+    inc_s = c3.checkbox("Incluir los retardos (si hay secuencia)", True)
+    if st.button("Generar PDF", type="primary"):
+        el = ss.get("energy_last")
+        with st.spinner("Generando el PDF…"):
+            pdf = report.build_pdf(res, info, pdf_params + [("Macizo (RMR · RQD · σci · ρ)",
+                                                             f"{RMR} · {RQD} % · {UCS:.0f} MPa · {rho_r:.2f} t/m³"),
+                                                            ("Iniciación", system)],
+                                   seq=ss.seq if (inc_s and ss.seq is not None) else None,
+                                   energy=el if (inc_e and el and el.get("sig") == sig) else None)
+        ss.pdf_bytes = pdf
+    if ss.get("pdf_bytes"):
+        st.download_button("Descargar PDF del diseño", ss.pdf_bytes, f"diseno_{labor.lower()}.pdf", "application/pdf")

@@ -4,7 +4,8 @@ Cada generador trabaja en el plano del frente (coordenadas locales u, v respecto
 cuele) y devuelve los taladros del cuele con su inclinación lateral, los taladros vacíos, el
 polígono de abertura que deja el cuele y el registro de cálculos.
 
-Fuentes: [C] Carpio (2025) cap. 3.2; [LJ] López Jimeno (1987) cap. 22 (Figs. 22.5–22.27).
+Fuentes: [C] Carpio (2025) cap. 3.2; [LJ] López Jimeno (1987) cap. 22 (Figs. 22.5–22.27);
+[K] Konya, Manual de voladura, cap. 9.3 (cuña quemada con barreno vacío grande).
 """
 from __future__ import annotations
 
@@ -24,12 +25,13 @@ CUT_TYPES = [
     "Cilíndrico en espiral / doble espiral",
     "Coromant (dos vacíos secantes 57 mm)",
     "Cráter (Livingston, barreno central)",
+    "Cuña quemada — Konya (barreno vacío grande)",
     "En V / cuña",
     "En abanico",
     "Instantáneo piramidal",
 ]
-PARALLEL_CUTS = CUT_TYPES[:9]
-ANGLED_CUTS = CUT_TYPES[9:]
+ANGLED_CUTS = ["En V / cuña", "En abanico", "Instantáneo piramidal"]
+PARALLEL_CUTS = [c for c in CUT_TYPES if c not in ANGLED_CUTS]
 CUT_NOTES = {
     "Cilíndrico 4 secciones — Holmberg (Carpio)": "Ec. 23–46 del libro de Carpio (abertura A_h = √2·X).",
     "Cilíndrico 4 secciones — Holmberg (López Jimeno, con desviación)":
@@ -47,6 +49,10 @@ CUT_NOTES = {
                                             "diámetro equivalente en la recursión de Holmberg.",
     "Cráter (Livingston, barreno central)": "§4.3 y Fig. 22.23 LJ: carga esférica (L = 6D) a la profundidad óptima "
                                             "D_o en un barreno central de gran diámetro; avance por cráter 4/3·D_o.",
+    "Cuña quemada — Konya (barreno vacío grande)":
+        "Konya §9.3.3: D_H = d_H·√N; B1 = 1.5·D_H; R1 = B1; S_c = √2·R; cuadros siguientes B_n = S_c(n−1), "
+        "R_n = S_c(n−1)/2 + B_n; se añaden cuadros mientras la carga rompa el bordo (ec. 6.2); "
+        "H = 0.15 + 34.1·D_H − 39.4·D_H²; avance L = 0.95·H; ≥ 50 ms entre periodos del cuele.",
     "En V / cuña": "§4.4-A LJ: H_c = 46D, B = 34D, q_f = 990D², l_f = 0.3L, q_c = 0.5q_f, T = 12D; "
                    "contracuele B = 24D, q_c = 0.4q_f; avance 45–50 % del ancho; B ≤ 0.5L − 0.2.",
     "En abanico": "§4.4-B LJ: B = 23D (B < L − 0.4), H_c = 42D, q_f = 990D², l_f = 0.3L, q_c = 0.4q_f.",
@@ -79,6 +85,8 @@ class CutCtx:
     Et: float = 1.5                # factor energía-tensión (cráter)
     delta_o: float = 0.5           # relación óptima de profundidades (cráter)
     d_crater: float = 0.2          # diámetro del barreno central del cráter (m)
+    rho_r: float = 2.7             # densidad de la roca (t/m³) — Konya
+    De_mm: float | None = None     # diámetro de la carga (mm) — Konya
 
 
 @dataclass
@@ -432,7 +440,67 @@ def angled(ctx: CutCtx, kind):
     return r
 
 
+def konya_burn(ctx: CutCtx):
+    """Cuña quemada con barreno grande — Konya §9.3.3 (cálculos simplificados)."""
+    from .common import KONYA_EQS, konya_burden
+    r = CutResult()
+    lg = r.log
+    DH = ctx.d2 * math.sqrt(ctx.NB)
+    lg.append(("Diámetro equivalente del vacío", "D_H", DH, "m", "(9.10) d_H·√N"))
+    Hk = 0.15 + 34.1 * DH - 39.4 * DH ** 2
+    lg.append(("Profundidad alcanzable con el vacío", "H_máx", Hk, "m", "0.15 + 34.1·D_H − 39.4·D_H² (Holmberg)"))
+    H = ctx.H
+    lg.append(("Profundidad del barreno", "H", H, "m", "longitud efectiva de la barra"))
+    if ctx.H > 1.05 * Hk:
+        r.warnings.append(f"H = {ctx.H:.2f} m supera la profundidad que asegura el vacío de {DH * 1000:.0f} mm "
+                          f"({Hk:.2f} m); compruebe con la Fig. 9.8 de Konya (avance vs diámetro del vacío).")
+    r.L = H
+    r.advance = 0.95 * H
+    lg.append(("Avance esperado", "L", r.advance, "m", "(9.15) 0.95·H"))
+    De = ctx.De_mm or ctx.d1 * 1000
+    Bc = konya_burden(De, ctx.rho_e, ctx.rho_r, KONYA_EQS[1])
+    lg.append(("Bordo que rompe la carga", "B", Bc, "m", f"(6.2) 0.012·(2ρe/ρr + 1.5)·De, De = {De:.1f} mm"))
+    max_open = ctx.max_open or 0.8 * min(ctx.width, ctx.height)
+    secs = []
+    B, R, rot = 1.5 * DH, 1.5 * DH, 0.0
+    n = 1
+    while True:
+        Sc = math.sqrt(2) * R
+        if n > 1 and B > Bc:
+            lg.append((f"Cuadro {n}: bordo {B:.2f} m > {Bc:.2f} m", "—", "fin de la cuña", "", "siguen los auxiliares"))
+            break
+        if math.sqrt(2) * R > max_open and n > 1:
+            r.warnings.append(f"El cuadro {n} no cabe en el frente; la cuña se limita a {n - 1} cuadro(s).")
+            break
+        name = "Arranque" if n == 1 else f"Cuadrante {n - 1}"
+        eqB = "(9.11) 1.5·D_H" if n == 1 else f"B{n} = S_c{n - 1}"
+        lg += [(f"Bordo cuadro {n}", f"B{n}", B, "m", eqB), (f"Radio cuadro {n}", f"R{n}", R, "m",
+                                                          "(9.12) R1 = B1" if n == 1 else f"S_c{n - 1}/2 + B{n}"),
+               (f"Lado del cuadro {n}", f"S_c{n}", Sc, "m", "√2·R")]
+        secs.append(dict(name=name, dist=R, rot=rot, B=B, Ah=Sc, q=ctx.q_avail))
+        if n >= 5:
+            break
+        B_next = Sc
+        R = Sc / 2 + B_next
+        B = B_next
+        rot = 45.0 - rot
+        n += 1
+    for sct in secs:
+        T = max(0.5 * sct["B"], 10 * ctx.d1)
+        for (u, v) in _sq(sct["dist"], sct["rot"]):
+            r.holes.append(dict(zona=sct["name"], u=u, v=v, tu=0.0, tv=0.0, B=sct["B"], S=sct["Ah"], q=ctx.q_avail,
+                                Tk=T, L=H))
+    r.relief = [(u, v, ctx.d2) for u, v in _relief_positions(ctx.NB, ctx.d2)]
+    last = secs[-1]
+    r.opening = Polygon(_sq(last["dist"], last["rot"]))
+    r.sections = secs
+    r.q0 = ctx.q_avail
+    return r
+
+
 def make_cut(cut_type: str, ctx: CutCtx) -> CutResult:
+    if cut_type.startswith("Cuña quemada — Konya"):
+        return konya_burn(ctx)
     if cut_type.startswith("Cilíndrico 4 secciones — Holmberg (Carpio)"):
         return cylindrical(ctx, "Carpio")
     if cut_type.startswith("Cilíndrico 4 secciones — Holmberg (López"):

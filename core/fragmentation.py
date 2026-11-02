@@ -1,6 +1,8 @@
 """Predicción de fragmentación (P80) para la zona de producción.
 
-Ruta A: Kuz-Ram (Kuznetsov + Cunningham + Rosin-Rammler).
+Ruta A: Kuz-Ram (Kuznetsov + Cunningham + Rosin-Rammler) o KCO (Kuznetsov + Cunningham + Swebrec,
+        Ouchterlony 2005), con exponentes de Kuznetsov calibrables (reparametrización de la ecuación de
+        Kuznetsov, paper del curso).
 Ruta B: modelo ML entrenado por el usuario + metaheurística (Evolución Diferencial).
 """
 from __future__ import annotations
@@ -50,6 +52,14 @@ class KuzRamInput:
     SB: float = 1.25
     K_ref: float | None = None   # factor de carga de referencia (abanicos) para B de referencia
     B_ref: float | None = None
+    model: str = "Kuz-Ram"       # "Kuz-Ram" (Rosin-Rammler) | "KCO" (Swebrec)
+    xmax_cm: float | None = None  # tamaño máximo in situ (KCO); None → min(B, S)
+    ea: float = 0.8              # exponentes de Kuznetsov: K^-a · Q^b · (115/RWS)^c
+    eb: float = 1 / 6
+    ec: float = 19 / 30
+
+
+MODELS = ["Kuz-Ram", "KCO"]
 
 
 def kuzram(B: float, k: KuzRamInput, S: float | None = None) -> dict:
@@ -59,11 +69,43 @@ def kuzram(B: float, k: KuzRamInput, S: float | None = None) -> dict:
     K = Q / V                               # factor de carga (kg/m³)
     if k.K_ref and k.B_ref:                 # abanicos: K escala con la malla de fondo
         K = k.K_ref * (k.B_ref * k.SB * k.B_ref) / (B * S)
-    X50 = k.A * K ** -0.8 * Q ** (1 / 6) * (115 / k.rws_pct) ** (19 / 30)   # cm (Kuznetsov)
+    X50 = k.A * K ** -k.ea * Q ** k.eb * (115 / k.rws_pct) ** k.ec   # cm (Kuznetsov)
     n = (2.2 - 14 * B / k.d_mm) * math.sqrt((1 + S / B) / 2) * (1 - k.W / B) * (k.Lc / k.H)  # Cunningham
     n = max(n, 0.3)
-    P80 = X50 * (LN5_LN2) ** (1 / n)
-    return dict(B=B, S=S, Q=Q, V=V, K=K, X50=X50, n=n, P80=P80)
+    out = dict(B=B, S=S, Q=Q, V=V, K=K, X50=X50, n=n, model=k.model)
+    if k.model == "KCO":
+        xmax = k.xmax_cm if k.xmax_cm else 100 * min(B, S)
+        xmax = max(xmax, 1.05 * X50)
+        b = 2 * math.log(2) * math.log(xmax / X50) * n        # Ouchterlony (2005)
+        out.update(xmax=xmax, b=b)
+    out["P80"] = size_model(out, 80)
+    return out
+
+
+def size_model(r: dict, pct: float) -> float:
+    """Tamaño (cm) para un % pasante según el modelo (Rosin-Rammler o Swebrec)."""
+    if r.get("model") == "KCO":
+        p = min(max(pct, 1e-6), 99.999) / 100
+        xmax, X50, b = r["xmax"], r["X50"], r["b"]
+        return xmax * math.exp(-math.log(xmax / X50) * ((1 / p - 1) ** (1 / b)))
+    return size_at(r["X50"], r["n"], pct)
+
+
+def passing_model(r: dict, x):
+    """% pasante para tamaños x (cm)."""
+    x = np.asarray(x, dtype=float)
+    if r.get("model") == "KCO":
+        xmax, X50, b = r["xmax"], r["X50"], r["b"]
+        xc = np.clip(x, 1e-6, xmax * (1 - 1e-9))
+        P = 1 / (1 + (np.log(xmax / xc) / math.log(xmax / X50)) ** b)
+        return np.where(x >= xmax, 100.0, P * 100)
+    return (1 - np.exp(-0.693 * (x / r["X50"]) ** r["n"])) * 100
+
+
+def model_curve(r: dict, xmax=None, npts=240):
+    xmax = xmax or (r.get("xmax") or r["X50"] * 4)
+    x = np.linspace(0.01, xmax, npts)
+    return x, passing_model(r, x)
 
 
 def size_at(X50, n, pct):

@@ -1,5 +1,5 @@
-"""Labores de avance horizontal: método Holmberg (Carpio cap. 3.2 / López Jimeno cap. 22) con
-selección de cuele, método de carga y modo para labores estrechas."""
+"""Labores de avance horizontal: método Holmberg (Carpio cap. 3.2 / López Jimeno cap. 22) o diseño de
+Konya (Manual de voladura, cap. 9.3), con selección de cuele, método de carga y modo para labores estrechas."""
 from __future__ import annotations
 
 import math
@@ -9,8 +9,8 @@ import numpy as np
 import pandas as pd
 from shapely.geometry.polygon import orient
 
-from .common import (Explosive, Log, Result, Rock, bmax_holmberg, colors_for, dt_y_C, factor_carga_tabla,
-                     finalize_holes, new_hole, relief_row, summary_common)
+from .common import (KONYA_EQS, Explosive, Log, Result, Rock, bmax_holmberg, colors_for, dt_y_C,
+                     factor_carga_tabla, finalize_holes, konya_burden, new_hole, relief_row, summary_common)
 from .cuts import ANGLED_CUTS, CUT_NOTES, CutCtx, make_cut
 from .facelayout import fill_helpers, sample_chain, tunnel_chains
 
@@ -24,6 +24,7 @@ CONTOUR_Z = {"Hastiales", "Corona", "Arrastre"}
 CHARGE_METHODS = ["Carpio — q₀ en todas las zonas (cap. 3.2)",
                   "Carpio — segundo método con factores (cap. 3.4)",
                   "López Jimeno — carga de fondo y columna (cap. 22)"]
+DESIGNS = ["Holmberg (Carpio / López Jimeno)", "Konya (Manual de voladura, cap. 9.3)"]
 FACTORS_C2 = {"Arranque": 1.0, "Cuadrante 1": 0.95, "Cuadrante 2": 0.90, "Cuadrante 3": 0.85,
               "Cuadrante 4": 0.85, "Ayuda de hastiales": 0.80, "Ayuda de corona": 0.80, "Ayuda de arrastre": 0.80,
               "Hastiales": 0.65, "Arrastre": 0.98}
@@ -72,6 +73,7 @@ class AvanceOptions:
     narrow: bool = False
     B_prod_override: float | None = None
     SB_prod: float = 1.25
+    design: str = DESIGNS[0]
 
 
 def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive, o: AvanceOptions,
@@ -107,6 +109,7 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
     max_open = (0.55 if o.narrow else 0.8) * min(A, Ht)
     pearse = rock.Kv * drill.d1_mm / 1000 * math.sqrt(exm.PD / rock.Std) if o.cut_method == "Pearse" else None
     ctx = CutCtx(d1=d1, d2=d2, NB=drill.NB, H=Hp, F=F, c=c, rws=exm.rws, q_avail=q_avail, UCS=rock.UCS,
+                 rho_r=rock.rho, De_mm=exm.De_mm,
                  width=(A - 2 * o.contour_offset) if o.cut_type in ANGLED_CUTS else A - 2 * margin,
                  height=Ht - 2 * margin, factor=o.cut_factor, pearse_B=pearse,
                  n_sections=o.n_quadrants, max_open=max_open, spacing=o.burn_spacing, vertex_deg=o.vertex_deg,
@@ -119,7 +122,10 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
     if not o.cut_type.startswith("Cilíndrico 4 secciones — Holmberg (Carpio)"):
         q0 = q_avail  # LJ: la destroza usa la concentración del cartucho disponible
     angled = o.cut_type in ANGLED_CUTS or cut.L is not None
-    if angled:
+    if o.cut_type.startswith("Cuña quemada — Konya"):
+        adv = cut.advance
+        L_face = cut.L
+    elif angled:
         adv = cut.advance
         L_face = min(Hp, adv + 0.10)
     else:
@@ -171,6 +177,45 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
         else:
             Bprod = o.B_prod_override
         lg.add("6. Predicción P80", "Burden de producción impuesto", "B_prod", Bprod, "m", "optimización por P80")
+    konya = o.design.startswith("Konya")
+    T_k = {}
+    if konya:
+        FK = "4. Destroza y contorno (Konya cap. 9.3)"
+        De = exm.De_mm or drill.d1_mm
+        Bk = lg.add(FK, "Bordo de la carga", "B", konya_burden(De, exm.rho, rock.rho, KONYA_EQS[1]), "m",
+                    f"(6.2) 0.012·(2ρe/ρr + 1.5)·De; De = {De:.1f} mm")
+        LO = lg.add(FK, "Ajuste del perímetro (look-out)", "LO", 0.1 + L_face * math.tan(math.radians(2)), "m",
+                    "(9.9) 0.1 + H·tan 2°")
+        gs = LO / math.hypot(L_face, LO)
+        o.gamma_deg = math.degrees(math.asin(gs))
+        Bp = lg.add(FK, "Bordo práctico (al fondo)", "B_p", Bk - F, "m", "B − F")
+        lg.add(FK, "Auxiliares: espaciamiento y taco", "S / T", f"{1.1 * Bp:.2f} / {0.5 * Bp:.2f}", "m",
+               "(9.16–9.17) S = 1.1B; T = 0.5B")
+        lg.add(FK, "Piso: espaciamiento y taco", "S / T", f"{1.1 * Bp:.2f} / {0.2 * Bp:.2f}", "m",
+               "(9.18–9.19) S = 1.1B; T = 0.2B")
+        Bp_limit = Bp
+        Bprod = min(o.B_prod_override, Bp) if o.B_prod_override else Bp
+        o.SB_prod = o.SB_prod if o.B_prod_override else 1.1
+        Bp_arr = Bp
+        Bm_arr = Bp
+        N_arr = math.ceil(s.floor_width / (1.1 * Bp)) + 1
+        lg.add(FK, "N° taladros de piso", "N°", N_arr, "", "⌈ancho/(1.1·B)⌉ espacios + 1 (ejemplo 9.3)")
+        if controlled:
+            S_cor = lg.add(FK, "Contorno con recorte: espaciamiento", "S", min(0.60, max(0.45, 16 * d1)), "m",
+                           "0.45–0.60 m entre centros (§9.3.3.8); S = 16·D_h (8.4) acotado")
+            Bp_cor = lg.add(FK, "Contorno con recorte: bordo", "B", 1.3 * S_cor, "m", "(8.5) B ≥ 1.3·S")
+            q_cor = lg.add(FK, "Contorno con recorte: carga", "q", (d1 * 1000) ** 2 / 12 / 1000, "kg/m",
+                           "(8.1) D_h²/12 g/m")
+            Bp_h = Bp_cor
+            T_k.update({"Corona": Lt, "Hastiales": Lt})
+        else:
+            Bp_cor, S_cor, Bp_h = Bp, 1.1 * Bp, Bp
+            lg.add(FK, "Contorno sin recorte: espaciamiento y taco", "S / T", f"{1.1 * Bp:.2f} / {Bp:.2f}", "m",
+                   "(9.20–9.21) S = 1.1B; T = B")
+            T_k.update({"Corona": Bp, "Hastiales": Bp})
+        T_k.update({"Arrastre": 0.2 * Bp, "Ayuda de hastiales": 0.5 * Bp, "Ayuda de corona": 0.5 * Bp,
+                    "Ayuda de arrastre": 0.5 * Bp})
+        lg.add(FK, "Tiempos", "—", "cuña ≥ 50 ms entre periodos; auxiliares ≥ 100 ms o LP; piso al final", "", "§9.3.3.9")
     P.update(Hp=Hp, F=F, c=c, q0=q0, Lt=Lt, Lc=Lc, L_face=L_face, adv=adv, Bp_limit=Bp_limit, Bp_prod=Bprod,
              d1=d1, d2=d2, Npred=Npred, gs=gs)
 
@@ -187,13 +232,17 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
 
     def charges(zona, L, B, qz=None, spec=None):
         """Devuelve (Lt, cargas[(s0,s1,q)], q_ref)."""
+        if spec and "Tk" in spec:  # cuña quemada de Konya: taco 0.5·B
+            T = min(spec["Tk"], 0.5 * L)
+            return T, [(T, L, spec["q"])], spec["q"]
+        Lt = min(T_k.get(zona, P["Lt"]), 0.6 * L)
         if spec and "qf" in spec:  # cuele en ángulo con fondo/columna propios
             T = spec["T"]
             lf = spec["lf"]
             return T, [(T, L - lf, spec["qc"]), (L - lf, L, spec["qf"])], spec["qf"]
         if spec and "decks" in spec:
             return 0.0, [(a, b, spec["q"]) for a, b in spec["decks"]], spec["q"]
-        if zona == "Corona" and controlled:
+        if zona in ("Corona",) + (("Hastiales",) if konya else ()) and controlled:
             return Lt, [(Lt, L, q_cor)], q_cor
         m = o.charge_method
         if m.startswith("Carpio — q₀"):
@@ -217,14 +266,16 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
         T, cargas, qref = charges(zona, L, B, qz, spec)
         uy = math.sqrt(max(1e-6, 1 - ux_lat ** 2 - uz_lat ** 2))
         ex = exc if (zona == "Corona" and controlled) else exm
+        if konya and controlled and zona == "Hastiales":
+            ex = exc
         rows.append(new_hole(zona, GROUP[zona], x, y, x, 0.0, y, (ux_lat, uy, uz_lat), L, T, cargas,
                              d_mm or drill.d1_mm, ex.label(), B, S, qref, cuele=zona in CUT_Z,
                              w_cart=ex.w_cart))
 
     for h in cut.holes:
         add_face_hole(h["zona"], xc + h["u"], yc + h["v"], h.get("tu", 0.0), h.get("tv", 0.0), h.get("B"),
-                      h.get("S"), h.get("q"), spec=h if ("qf" in h or "decks" in h) else None, Lh=h.get("L"),
-                      d_mm=h.get("d_mm"))
+                      h.get("S"), h.get("q"), spec=h if ("qf" in h or "decks" in h or "Tk" in h) else None,
+                      Lh=h.get("L"), d_mm=h.get("d_mm"))
     rel = [relief_row(xc + u, yc + v, dd * 1000, xc + u, 0.0, yc + v, (0, 1, 0), L_face + 0.1)
            for (u, v, dd) in cut.relief]
     res.relief = pd.DataFrame(rel, columns=["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"])
@@ -248,7 +299,7 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
         for x, y, tx, ty in sample_chain(ch, n, True):
             add_face_hole("Arrastre", x, y, 0.0, -math.sin(gam), Bp_arr, ch.length / max(n - 1, 1))
             contour_pts.append((x, y))
-    S_h = 1.25 * max(Bp_h, 0.3)
+    S_h = (S_cor if controlled else 1.1 * Bp_h) if konya else 1.25 * max(Bp_h, 0.3)
     for side in ("der", "izq"):
         if side in chains:
             ch = chains[side]

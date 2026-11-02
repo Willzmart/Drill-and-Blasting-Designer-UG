@@ -3,6 +3,10 @@
 Fuentes:
   [C]  Carpio Chávez, A. (2025). Diseño de perforación y voladura de labores de avance. Cusco.
   [LJ] López Jimeno, C. et al. (1987). Manual de perforación y voladura de rocas. IGME, Madrid.
+  [K]  Konya, C. J. y Albarrán, E. (1998). Diseño de voladuras (Manual de voladura Konya).
+  [TL] Llontop, M. Curso Diseño y control de perforación y voladura con taladros largos (sesiones 05–09)
+       y plantillas Excel; Salas, C. J. Curso Cálculos para la perforación y voladura en minería subterránea.
+  [EN] Enaex (2016). Guía del explosivista.
 """
 from __future__ import annotations
 
@@ -22,6 +26,10 @@ CARTRIDGES = {  # nombre: (diámetro m, longitud m)
     '7/8" x 7"': (0.0222, 0.1778),
 }
 # Emulnor: datos del Ejemplo N°06 [C]. 7/8"x7": peso estimado con la densidad del producto.
+# E: energía (MJ/kg). ANFO = 3.82 MJ/kg [EN]; para los demás se usa RWS × 3.82 (coincide con las fichas de
+# Emulnor 500/1000/3000/5000 dentro de ±2 %). Examon y dinamitas: densidad y VOD del curso [TL]; RWS
+# de la plantilla del curso (Examon) o referencial (dinamitas): verifique la ficha del fabricante.
+E_ANFO = 3.82
 EXPLOSIVES = {
     "Emulnor 500": dict(vod=4000, rho=0.90, rws=0.70, granel=False,
                         w={'1 1/4" x 12"': 0.200, '1" x 8"': 0.084, '1" x 12"': 0.128}),
@@ -33,12 +41,19 @@ EXPLOSIVES = {
                          w={'1 1/4" x 12"': 0.265, '1" x 8"': 0.115, '1" x 12"': 0.176}),
     "ANFO (granel)": dict(vod=3000, rho=0.80, rws=1.00, granel=True, w={}),
     "Emulsión a granel": dict(vod=5000, rho=1.15, rws=0.90, granel=True, w={}),
+    "Examon P (granel)": dict(vod=3900, rho=0.84, rws=1.114, granel=True, w={}),
+    "Examon V (granel)": dict(vod=4000, rho=0.85, rws=1.267, granel=True, w={}),
+    "Dinamita semigelatina 45 %": dict(vod=3800, rho=1.08, rws=0.90, granel=False, w={}),
+    "Dinamita semigelatina 65 %": dict(vod=4200, rho=1.14, rws=0.95, granel=False, w={}),
+    "Dinamita semigelatina 80 %": dict(vod=4400, rho=1.17, rws=1.00, granel=False, w={}),
 }
 
 # Detonadores no eléctricos Exsanel — Tabla N°05 [C]
 EXSANEL_MS = [25, 50, 75, 100, 125, 150, 175, 200, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000, 1200]
 EXSANEL_LP = [100, 200, 300, 400, 500, 600, 800, 1000, 1200, 1400, 1800, 2400, 3000, 3800, 4600, 5500, 6400,
               7400, 8500, 9600]
+# Fanel (Famesa) periodo corto 5–25 ms — tabla del curso de taladros largos [TL], series 1 a 20
+FANEL_MS = [25, 50, 75, 100, 125, 150, 175, 200, 225, 250, 300, 350, 400, 450, 500, 600, 700, 800, 900, 1000]
 
 # Tiempo mínimo entre taladros del arranque (ms por metro de taladro) — Tabla N°04 [C]
 def ms_por_metro(RMR):
@@ -97,6 +112,13 @@ class Rock:
     Q: float = 1.95          # Barton
     JSF: float = 0.9
     E: float = 35.0          # GPa (Kuz-Ram/Lilly)
+    sigma_t: float | None = None   # resistencia a tracción estática (MPa); None → σci/10
+    nu: float = 0.25               # relación de Poisson
+    Vp_user: float | None = None   # velocidad de onda P medida (m/s); None → 3500 + 1000·log10(Q)
+
+    @property
+    def st(self):
+        return self.sigma_t if self.sigma_t else self.UCS / 10
 
     @property
     def CE(self):  # consumo específico [C]
@@ -116,7 +138,12 @@ class Rock:
 
     @property
     def Vp(self):
-        return 3500 + 1000 * math.log10(max(self.Q, 1e-3))
+        return self.Vp_user if self.Vp_user else 3500 + 1000 * math.log10(max(self.Q, 1e-3))
+
+    @property
+    def ppv_crit(self):
+        """VPP crítica de la roca (mm/s) = σt·Vp/E — curso de taladros largos, sesión 08 [TL]."""
+        return self.st * self.Vp / self.E
 
 
 @dataclass
@@ -129,12 +156,30 @@ class Explosive:
     w_cart: float = 0.25       # kg/cartucho (0 si es a granel)
     L_cart: float = 0.3048     # m
     granel: bool = False
+    E_MJkg: float = 0.0        # energía (MJ/kg); 0 → RWS·3.82
+    atacado: float = 1.0       # longitud confinada / nominal del cartucho (0.8 en las plantillas del curso [TL])
+
+    @property
+    def energy(self):
+        return self.E_MJkg if self.E_MJkg > 0 else self.rws * E_ANFO
 
     def q_lineal(self, d_hole_m: float, acople: float = 1.0) -> float:
-        """Densidad lineal de carga (kg/m): cartucho = peso/longitud; granel = ρ·π·D²/4."""
+        """Densidad lineal de carga (kg/m): cartucho = peso/(longitud·atacado); granel = ρ·π·D²/4."""
         if self.granel or self.w_cart <= 0:
             return self.rho * 1000 * math.pi * d_hole_m ** 2 / 4 * acople
-        return self.w_cart / self.L_cart
+        return self.w_cart / (self.L_cart * max(self.atacado, 0.3))
+
+    @property
+    def De_mm(self):
+        """Diámetro de la carga (mm): cartucho o, a granel, None (se usa el del taladro)."""
+        if self.granel or self.cart not in CARTRIDGES:
+            return None
+        return CARTRIDGES[self.cart][0] * 1000
+
+    @property
+    def PD_cook(self):
+        """Presión de detonación (MPa) = 423·10⁻⁶·ρe·VOD²/(1 + 0.8·ρe) — plantillas del curso [TL]."""
+        return 423e-6 * self.rho * self.vod ** 2 / (1 + 0.8 * self.rho)
 
     @property
     def PD(self):  # presión de detonación [C] (MPa)
@@ -150,14 +195,14 @@ def make_explosive(name, cart=None, custom=None) -> Explosive:
     e = EXPLOSIVES[name]
     if e["granel"]:
         return Explosive(name=name, vod=e["vod"], rho=e["rho"], rws=e["rws"], cart="granel", w_cart=0.0,
-                         L_cart=1.0, granel=True)
+                         L_cart=1.0, granel=True, E_MJkg=e.get("E", 0.0))
     cart = cart or '1 1/4" x 12"'
     w = e["w"].get(cart)
     if w is None:  # cartucho no tabulado: estimar con la densidad
         dcar, lcar = CARTRIDGES[cart]
         w = e["rho"] * 1000 * math.pi * dcar ** 2 / 4 * lcar
     return Explosive(name=name, vod=e["vod"], rho=e["rho"], rws=e["rws"], cart=cart, w_cart=w,
-                     L_cart=CARTRIDGES[cart][1], granel=False)
+                     L_cart=CARTRIDGES[cart][1], granel=False, E_MJkg=e.get("E", 0.0))
 
 
 # ----------------------------------------------------------------------------
@@ -201,6 +246,68 @@ def bmax_langefors(D_mm, rho_e, prp, c, f, sb):
 def b_pearse_kv(Kv, D_mm, PD, Std):
     """B = Kv·D/1000·√(PD/Std) — Pearse modificado con Kv de Bórquez ([C] Ec. 06)."""
     return Kv * D_mm / 1000 * math.sqrt(PD / Std)
+
+
+# ----------------------------------------------------------------------------
+# Fórmulas del material de capacitación (Konya, curso de taladros largos, Onederra)
+# ----------------------------------------------------------------------------
+KONYA_EQS = ["Konya-Myers: B = 3.15·De·∛(ρe/ρr) (pies, pulg) — curso",
+             "Konya ec. 6.2: B = 0.012·(2·ρe/ρr + 1.5)·De",
+             "Konya ec. 6.3: B = 8·10⁻³·De·∛(Stv/ρr)"]
+KONYA_KD = {"Estratos hacia el corte (1.18)": 1.18, "Estratos hacia la cara (0.95)": 0.95,
+            "Otros tipos de depósito (1.00)": 1.00}                      # Tabla 6.3 [K]
+KONYA_KS = {"Altamente fracturada, juntas débiles (1.30)": 1.30,
+            "Capas delgadas bien cementadas (1.10)": 1.10, "Intacta y masiva (0.95)": 0.95}  # Tabla 6.4 [K]
+KONYA_KR = {"Una o dos hileras (1.0)": 1.0, "Tercera hilera o con apilamiento previo (0.9)": 0.9}  # Tabla 6.2 [K]
+
+
+def konya_burden(De_mm, rho_e, rho_r, eq=KONYA_EQS[0], stv=None):
+    """Burden de Konya (m) sin correcciones. De: diámetro de la carga (mm)."""
+    if eq.startswith("Konya-Myers"):
+        return 3.15 * (De_mm / 25.4) * (rho_e / rho_r) ** (1 / 3) * 0.3048
+    if "6.3" in eq:
+        return 8e-3 * De_mm * ((stv or 100.0) / rho_r) ** (1 / 3)
+    return 0.012 * (2 * rho_e / rho_r + 1.5) * De_mm
+
+
+def konya_spacing(L, B, delayed=True):
+    """Espaciamiento según la relación de rigidez L/B — ecs. 7.1–7.4 [K]. Devuelve (S, ecuación)."""
+    k = L / B if B > 0 else 4
+    if k >= 4:
+        return (1.4 * B, "L/B ≥ 4, retardada: S = 1.4·B (7.4)") if delayed else (2 * B, "L/B ≥ 4, instantánea: S = 2·B (7.2)")
+    if delayed:
+        return (L + 7 * B) / 8, "1 < L/B < 4, retardada: S = (L + 7B)/8 (7.3)"
+    return (L + 2 * B) / 3, "1 < L/B < 4, instantánea: S = (L + 2B)/3 (7.1)"
+
+
+def ash_burden(De_mm, Kb):
+    """Ash: B = Kb·De/12 (pies, De en pulgadas) → m. Kb ≈ 25 (ANFO) a 30 (emulsión) [TL]."""
+    return Kb * (De_mm / 25.4) / 12 * 0.3048
+
+
+def torbica_burden(PD_mpa, D_mm, sigma_t, nu):
+    """Torbica y Lapcevic (2018): B = 0.17·PD·r_h/(K·σt), K = (1 − ν)/((1 + ν)(1 − 2ν)) [TL].
+    PD en MPa, σt en MPa, r_h en m."""
+    K = (1 - nu) / ((1 + nu) * (1 - 2 * nu))
+    return 0.17 * PD_mpa * (D_mm / 2000) / (K * sigma_t), K
+
+
+def rustan_burden(D_mm):
+    """Rustan: B = 11.8·D^0.63 (D en m) — citado por Onederra y Chitombo (2007)."""
+    return 11.8 * (D_mm / 1000) ** 0.63
+
+
+def pearse_course_burden(Kv, D_mm, PD_mpa, sigma_t):
+    """Pearse según la plantilla del curso: B = Kv·D·√(PD/Std), Std = 4.5·σt, PD de Cook [TL]."""
+    return Kv * D_mm / 1000 * math.sqrt(PD_mpa / (4.5 * sigma_t))
+
+
+def ring_stemming(k, D_m, L):
+    """Retacado escalonado de anillos Ts–Tl–Tm–Tl (AEL / Onederra y Chitombo 2007; curso [TL]):
+    Ts = 20D, Tm = 50D, Tl = 125D; nunca más de 2/3 de la longitud del taladro."""
+    seq = (20, 125, 50, 125)
+    f = seq[k % 4]
+    return min(f * D_m, 2 / 3 * L), {20: "Ts = 20D", 50: "Tm = 50D", 125: "Tl = 125D"}[f]
 
 
 # ----------------------------------------------------------------------------
