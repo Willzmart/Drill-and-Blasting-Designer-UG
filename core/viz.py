@@ -31,6 +31,7 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
     for xs, ys in v.get("lines", []):
         fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#888", width=1), showlegend=False,
                                  hoverinfo="skip"))
+    _drill_overlay(fig, v.get("drill"))
     if show_openings:
         for name, coords in v.get("openings", []):
             x, y = _xy(coords)
@@ -88,6 +89,75 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
     return fig
 
 
+def _drill_overlay(fig, d):
+    """Labor de perforación, pivote del equipo, carrusel y trayectoria pivote–boca."""
+    if not d:
+        return
+    for k, dco in enumerate(d.get("drift", []) if isinstance(d.get("drift", [None])[0], list) else [d["drift"]]):
+        x, y = _xy(dco)
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor="rgba(31,119,180,0.10)",
+                                 line=dict(color="#1f77b4", width=2), name="Labor de perforación" if k == 0 else None,
+                                 showlegend=k == 0, hoverinfo="skip"))
+    xs, ys = [], []
+    for fx, fy in d.get("feed", []):
+        xs += list(fx) + [None]
+        ys += list(fy) + [None]
+    if xs:
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#1f77b4", width=0.8, dash="dot"),
+                                 name="Pivote → boca", hoverinfo="skip"))
+    for k, cco in enumerate(d.get("carousels", [])):
+        x, y = _xy(cco)
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line=dict(color="#e377c2", width=2, dash="dash"),
+                                 name="Carrusel del equipo" if k == 0 else None, showlegend=k == 0, hoverinfo="skip"))
+    pv = d.get("pivots", [])
+    if pv:
+        fig.add_trace(go.Scatter(x=[p[0] for p in pv], y=[p[1] for p in pv], mode="markers", name="Pivote",
+                                 marker=dict(size=10, symbol="x", color="#e377c2", line=dict(width=1, color="#7a0f5a")),
+                                 hovertemplate="Pivote (%{x:.2f}, %{y:.2f})<extra></extra>"))
+
+
+def section_view(res, height=620):
+    """Sección transversal de taladros paralelos con las labores de perforación, pivotes y carrusel."""
+    sv = res.p.get("section_view")
+    if not sv:
+        return None
+    fig = go.Figure()
+    x, y = _xy(sv["stope"])
+    fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor=ROCK_FILL, line=dict(color="#333", width=2),
+                             name="Tajeo", hoverinfo="skip"))
+    _drill_overlay(fig, dict(drift=sv["drifts"], carousels=sv["carousels"]))
+    for ok in (True, False):
+        xs, ys = [], []
+        for hx, hy, a, _ in sv["holes"]:
+            if a == ok:
+                xs += list(hx) + [None]
+                ys += list(hy) + [None]
+        if xs:
+            fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#555" if ok else "#d62728", width=1.2,
+                                                                         dash=None if ok else "dash"),
+                                     name="Taladro" if ok else "Fuera del alcance del equipo", hoverinfo="skip"))
+    xs, ys = [], []
+    for cx, cy in sv["charges"]:
+        xs += list(cx) + [None]
+        ys += list(cy) + [None]
+    fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#ff7f0e", width=5), name="Carga",
+                             hoverinfo="skip"))
+    pv = sv["pivots"]
+    fig.add_trace(go.Scatter(x=[p[0] for p in pv], y=[p[1] for p in pv], mode="markers", name="Pivote (por taladro)",
+                             marker=dict(size=8, symbol="x", color=["#e377c2" if p[2] else "#d62728" for p in pv]),
+                             hovertemplate="Pivote (%{x:.2f}, %{y:.2f})<extra></extra>"))
+    lab = [f"{h[3]}" for h in sv["holes"]]
+    fig.add_trace(go.Scatter(x=[h[0][0] for h in sv["holes"]], y=[h[1][0] for h in sv["holes"]], mode="markers+text",
+                             text=lab, textposition="top center", textfont=dict(size=9), marker=dict(size=6, color="#111"),
+                             name="Boca", hoverinfo="skip"))
+    fig.update_yaxes(scaleanchor="x", scaleratio=1, title="Altura z (m)", zeroline=False)
+    fig.update_xaxes(title="Ancho / potencia y (m)", zeroline=False)
+    fig.update_layout(height=height, plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10),
+                      title="Sección transversal: labor de perforación, pivote y carrusel (primera fila)",
+                      legend=dict(x=1.02, y=1))
+    return fig
+
+
 # ----------------------------------------------------------------------------
 def _poly_mesh(coords, plane, c, color, opacity, name):
     pts = np.asarray(coords)[:-1]
@@ -102,7 +172,7 @@ def _poly_mesh(coords, plane, c, color, opacity, name):
                      showlegend=True, flatshading=True)
 
 
-def _prism(coords, plane, c0, c1, opacity, name):
+def _prism(coords, plane, c0, c1, opacity, name, color="#8a8a8a"):
     pts = np.asarray(coords)
     n = len(pts)
     a = np.r_[pts[:, 0], pts[:, 0]]
@@ -113,15 +183,15 @@ def _prism(coords, plane, c0, c1, opacity, name):
         I += [t, t + 1]
         J += [t + 1, n + t + 1]
         K += [n + t, n + t]
-    X, Y, Z = (a, k, b) if plane == "xz" else (a, b, k)
-    return go.Mesh3d(x=X, y=Y, z=Z, i=I, j=J, k=K, color="#8a8a8a", opacity=opacity, name=name, hoverinfo="skip",
+    X, Y, Z = (a, k, b) if plane == "xz" else ((k, a, b) if plane == "yz" else (a, b, k))
+    return go.Mesh3d(x=X, y=Y, z=Z, i=I, j=J, k=K, color=color, opacity=opacity, name=name, hoverinfo="skip",
                      showlegend=True)
 
 
 def _ring(coords, plane, c, name, dash=None, color="#444"):
     a, b = _xy(coords)
     k = [c] * len(a)
-    X, Y, Z = (a, k, b) if plane == "xz" else (a, b, k)
+    X, Y, Z = (a, k, b) if plane == "xz" else ((k, a, b) if plane == "yz" else (a, b, k))
     return go.Scatter3d(x=X, y=Y, z=Z, mode="lines", name=name, line=dict(color=color, width=4, dash=dash),
                         hoverinfo="skip")
 
@@ -176,10 +246,10 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
             if sc.get("slot"):
                 x0, x1, y0, y1, z0, z1 = sc["box"]
                 fig.add_trace(_box(x0 - 2.0, x0, y0, y1, z0, z1, "Corte lateral (cara libre)", "#d62728"))
-            if sc.get("drift"):
-                w, hh = sc["drift"]
-                x0, x1 = sc["box"][0], sc["box"][1]
-                fig.add_trace(_box(x0, x1, -w / 2, w / 2, 0, hh, "Galería de perforación", "#1f77b4"))
+            for kd, (dco, x0, x1) in enumerate(sc.get("drifts3d", [])):
+                nm = "Labor de perforación" + (f" {kd + 1}" if len(sc["drifts3d"]) > 1 else "")
+                fig.add_trace(_prism(dco, "yz", x0, x1, 0.18, nm, "#1f77b4"))
+                fig.add_trace(_ring(dco, "yz", x0, nm + " (contorno)", None, "#1f77b4"))
         eye = dict(x=1.7, y=-2.0, z=1.1)
 
     def pt(r, s):

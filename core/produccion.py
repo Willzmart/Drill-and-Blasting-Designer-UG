@@ -11,6 +11,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import LineString, Point, Polygon
 
+from .drilling import DrillSetup, carousel, collar_from_pivot, drift_centers, drift_polygon, rig_fits
 from .common import (KONYA_EQS, Explosive, Result, Rock, ash_burden, b_pearse_kv, bmax_holmberg, bmax_langefors,
                      colors_for, finalize_holes, konya_burden, konya_spacing, new_hole, pearse_course_burden,
                      ring_stemming, rustan_burden, summary_common, torbica_burden)
@@ -110,6 +111,7 @@ class ProdOptions:
     stv: float = 100.0            # potencia relativa por volumen (ec. 6.3)
     Kb: float = 30.0              # Ash
     fan_stem: str = FAN_STEMMING[0]
+    drill: DrillSetup | None = None   # labor de perforación, pivote y carrusel (taladros largos)
 
 
 def _burden(o: ProdOptions, rock: Rock, ex: Explosive, L, q, f, log, fase):
@@ -304,10 +306,23 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             res.warnings.append("Potencias menores a 1 m: la dilución puede ser alta con taladros largos.")
     elif m == PROD_METHODS[2]:  # abanicos
         AV = o.width
+        ds = o.drill or DrillSetup(width=o.drift_w, height=o.drift_h)
+        o.drift_w, o.drift_h = ds.width, ds.height
         z_lo, z_hi = (-o.down_h if o.fan_type != "Ascendente" else 0.0), (o.up_h if o.fan_type != "Descendente" else 0.0)
-        dp = (0.0, o.drift_h * 0.85)
+        drift = drift_polygon(ds)
+        dp = (ds.pivot_y, ds.pivot_h)
         ring = Polygon([(-AV / 2, z_lo), (AV / 2, z_lo), (AV / 2, o.drift_h + z_hi), (-AV / 2, o.drift_h + z_hi)])
-        drift = Polygon([(-o.drift_w / 2, 0), (o.drift_w / 2, 0), (o.drift_w / 2, o.drift_h), (-o.drift_w / 2, o.drift_h)])
+        F_d = "2a. Labor de perforación y equipo"
+        lg.add(F_d, "Labor de perforación", "—", f"{ds.kind.split(' (')[0]} {ds.width:.2f} × {ds.height:.2f} m", "",
+               f"área {drift.area:.2f} m²")
+        lg.add(F_d, "Punto de pivote del equipo", "(y, z)", f"({dp[0]:.2f}, {dp[1]:.2f})", "m",
+               "altura típica 1.3–1.5 m sobre el piso")
+        lg.add(F_d, "Rectángulo del carrusel", "a × h", f"{ds.car_w:.2f} × {ds.car_h:.2f}", "m", "depende del equipo")
+        if not rig_fits(drift, ds, dp):
+            res.warnings.append("El carrusel del equipo no cabe en la labor de perforación con el pivote indicado: "
+                                "amplíe la sección, baje el pivote o use un equipo más compacto.")
+        if not (1.3 <= ds.pivot_h <= 1.5):
+            res.warnings.append(f"Pivote a {ds.pivot_h:.2f} m del piso: lo habitual es 1.3–1.5 m.")
         Lavg = 0.5 * (math.hypot(AV / 2, z_hi + o.drift_h - dp[1]) + max(z_hi, abs(z_lo), 1.0))
         Bm, B = _burden(o, rock, ex, Lavg, q, o.f, lg, fase)
         B = o.B_override if o.B_override else B
@@ -331,8 +346,11 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         angs = [math.atan2(ty - dp[1], tx - dp[0]) for tx, ty in toes]
         nr = max(1, int(o.length / B))
         Ls = []
+        feed2d, dead = [], []
         for j, (tx, ty) in enumerate(toes):
-            L = math.hypot(tx - dp[0], ty - dp[1])
+            (cy, cz), dpc = collar_from_pivot(drift, dp, (tx, ty))
+            dead.append(dpc)
+            L = math.hypot(tx - cy, ty - cz)
             if L > 25:
                 res.warnings.append("Hay taladros de más de 25 m: requieren sistemas de orientación (LJ).")
             da = min([abs(angs[j] - angs[k]) for k in (j - 1, j + 1) if 0 <= k < len(angs)] or [0.5])
@@ -347,14 +365,15 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             lb = L / 5
             cargas = [(s0, max(s0, L - lb), o.col_ratio * q), (max(s0, L - lb), L, q)]
             Ls.append((L, L - s0, sum((b - a) * qq for a, b, qq in cargas)))
-            ux, uz = (tx - dp[0]) / L, (ty - dp[1]) / L
+            ux, uz = (tx - cy) / L, (ty - cz) / L
             for i in range(nr):
                 X0 = (i + 0.5) * B
                 if i == 0:
-                    lines2d.append(([dp[0], tx], [dp[1], ty]))
-                add("Primera fila" if i == 0 else "Producción", i, tx if i == 0 else tx, ty, X0, dp[0], dp[1],
+                    lines2d.append(([cy, tx], [cz, ty]))
+                    feed2d.append(([dp[0], cy], [dp[1], cz]))
+                add("Primera fila" if i == 0 else "Producción", i, tx if i == 0 else tx, ty, X0, cy, cz,
                     (uz * 0 + 0.0, ux, uz), L, cargas, [(0.0, s0)], B, S_toe)
-                rows[-1]["X0"], rows[-1]["Y0"], rows[-1]["Z0"] = X0, dp[0], dp[1]
+                rows[-1]["X0"], rows[-1]["Y0"], rows[-1]["Z0"] = X0, cy, cz
                 rows[-1]["ux"], rows[-1]["uy"], rows[-1]["uz"] = 0.0, ux, uz
                 rows[-1]["x"], rows[-1]["y"] = tx + (0.0 if i == 0 else 0.0), ty
         # 2D: vista de la sección (anillo); sólo el primer anillo se dibuja en 2D
@@ -363,12 +382,17 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             lg.add(fase, "Retacado escalonado de anillos", "T", f"Ts = {20 * D:.2f} · Tl = {125 * D:.2f} · Tm = {50 * D:.2f}",
                    "m", "secuencia Ts–Tl–Tm–Tl; T ≤ 2/3·L (AEL / Onederra y Chitombo 2007)")
         outline = list(ring.exterior.coords)
-        lines2d.append(([c[0] for c in drift.exterior.coords], [c[1] for c in drift.exterior.coords]))
+        if dead:
+            lg.add(F_d, "Distancia pivote–boca (media / máx.)", "—", f"{np.mean(dead):.2f} / {max(dead):.2f}", "m",
+                   "las bocas están donde la recta pivote–fondo corta el contorno de la labor")
+        P["drill2d"] = dict(drift=list(drift.exterior.coords), pivots=[dp], carousels=[list(carousel(ds, dp).exterior.coords)],
+                            feed=feed2d)
         xlabel, ylabel = "Ancho del tajeo y (m)", "Altura z (m)"
         ring_area = ring.area - drift.area
         vol = min(o.rows_blast, nr) * B * ring_area
         sources = [(t[0], t[1]) for t in toes]
-        scene.update(box=(0, o.length, -AV / 2, AV / 2, z_lo, o.drift_h + z_hi), drift=(o.drift_w, o.drift_h))
+        scene.update(box=(0, o.length, -AV / 2, AV / 2, z_lo, o.drift_h + z_hi),
+                     drifts3d=[(list(drift.exterior.coords), 0.0, o.length)])
         Lm = np.mean([a for a, _, _ in Ls]) if Ls else 10
         Lcm = np.mean([b for _, b, _ in Ls]) if Ls else 8
         Qm = np.mean([c for _, _, c in Ls]) if Ls else 10
@@ -529,6 +553,10 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     res.view2d = dict(kind="plan" if outline and m not in (PROD_METHODS[2], PROD_METHODS[5], PROD_METHODS[7]) else "front",
                       outline=outline, openings=[], lines=lines2d, xlabel=xlabel, ylabel=ylabel)
     res.scene3d = scene
+    if P.get("drill2d"):
+        res.view2d["drill"] = P["drill2d"]
+    if m in (PROD_METHODS[0], PROD_METHODS[1], PROD_METHODS[3]) and len(res.holes):
+        _parallel_drilling(res, o, scene, lg)
     P["vol"] = vol
     if m == PROD_METHODS[2]:  # en 2D sólo el primer anillo
         res.p["view_filter"] = "Primera fila"
@@ -549,6 +577,77 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                     W=o.e_coll + o.alpha * frag["H"], rws=ex.rws * 100, modo="optimizar", B_limit=frag["limit"],
                     K_override=frag.get("K_override"), zona="producción")
     return res
+
+
+def _parallel_drilling(res, o: ProdOptions, scene, lg):
+    """Taladros paralelos desde una labor de perforación superior: ubicación de las labores, pivote del equipo
+    sobre la prolongación del eje de cada taladro y verificación de que el carrusel quepa en la labor."""
+    ds = o.drill or DrillSetup()
+    F_d = "2a. Labor de perforación y equipo"
+    h = res.holes
+    H = float(h.Z0.max())
+    W = o.width
+    narrow = res.metodo == PROD_METHODS[1]
+    if ds.full_width:
+        from dataclasses import replace as _rep
+        ds = _rep(ds, kind="Rectangular", width=W + 0.4, n_drifts=1, drift_y=0.0)
+    centers, span = drift_centers(ds, W, narrow)
+    sec = ds.section()
+    lg.add(F_d, "Labor de perforación", "—", ("Cámara de ancho completo " if (o.drill and o.drill.full_width) else "")
+           + f"{ds.kind.split(' (')[0]} {ds.width:.2f} × {ds.height:.2f} m", "",
+           f"piso en la cota del techo del tajeo (z = {H:.1f} m)")
+    lg.add(F_d, "N° de labores de perforación", "n", len(centers), "",
+           "dato" if ds.n_drifts else f"automático: ancho del tajeo / (recorrido útil del pivote {span:.2f} m + carrusel)")
+    lg.add(F_d, "Pivote del equipo", "h_p", ds.pivot_h, "m", "sobre el piso de la labor (1.3–1.5 m)")
+    lg.add(F_d, "Rectángulo del carrusel", "a × h", f"{ds.car_w:.2f} × {ds.car_h:.2f}", "m", "depende del equipo")
+    drifts = [drift_polygon(ds, c, H) for c in centers]
+    reach = []
+    piv = []
+    for _, r in h.iterrows():
+        k = int(np.argmin([abs(r.Y0 - c) for c in centers]))
+        uz = r.uz if abs(r.uz) > 1e-6 else -1e-6
+        t = ds.pivot_h / (-uz) if uz < 0 else ds.pivot_h
+        py, pz = r.Y0 - r.uy * t, r.Z0 - r.uz * t if uz < 0 else r.Z0 + ds.pivot_h
+        ok = rig_fits(drifts[k], ds, (py, pz)) and abs(r.Y0 - centers[k]) <= sec.floor_width / 2 + 1e-6
+        reach.append(ok)
+        piv.append((py, pz))
+    h["alcance"] = reach
+    res.holes = h
+    n_bad = int((~h.alcance).sum())
+    first = h[h.grupo == h.grupo.min()]
+    if n_bad:
+        res.warnings.append(f"{n_bad} taladro(s) quedan fuera del alcance del equipo: el carrusel no cabe en la labor "
+                            f"al alinear el pivote con el eje del taladro. Agregue labores de perforación, ensánchelas, "
+                            f"o cambie a taladros en abanico.")
+    lg.add(F_d, "Taladros fuera del alcance del equipo", "—", n_bad, "", "carrusel centrado en el pivote fuera de la labor")
+    if o.width > len(centers) * sec.floor_width + 1e-6:
+        lg.add(F_d, "Ancho cubierto por las labores", "—", f"{len(centers) * sec.floor_width:.1f} de {o.width:.1f} m", "", "")
+    # vista en sección (primera fila) y planta
+    dip = math.radians(o.dip_deg) if res.metodo == PROD_METHODS[1] else math.pi / 2
+    sh = H / math.tan(dip) if dip < math.pi / 2 - 1e-6 else 0.0
+    stope = [(-W / 2, H), (W / 2, H), (W / 2 - sh, 0.0), (-W / 2 - sh, 0.0), (-W / 2, H)]
+    holes2d, ch2d, pv2d, car2d = [], [], [], []
+    for (_, r), (py, pz) in zip(h.iterrows(), piv):
+        if r.grupo != first.grupo.iloc[0]:
+            continue
+        y1, z1 = r.Y0 + r.uy * r.L, r.Z0 + r.uz * r.L
+        holes2d.append(([r.Y0, y1], [r.Z0, z1], bool(r.alcance), int(r.id)))
+        for s0, s1, _ in r.cargas:
+            ch2d.append(([r.Y0 + r.uy * s0, r.Y0 + r.uy * s1], [r.Z0 + r.uz * s0, r.Z0 + r.uz * s1]))
+        pv2d.append((py, pz, bool(r.alcance)))
+    if pv2d:
+        ys = [p[0] for p in pv2d]
+        for k in (int(np.argmin(ys)), int(np.argmax(ys))):
+            car2d.append(list(carousel(ds, pv2d[k][:2]).exterior.coords))
+    res.p["section_view"] = dict(stope=stope, drifts=[list(d.exterior.coords) for d in drifts], holes=holes2d,
+                                 charges=ch2d, pivots=pv2d, carousels=car2d, H=H)
+    for c in centers:
+        res.view2d.setdefault("lines", [])
+        hw = sec.floor_width / 2
+        L0 = scene.get("box", (0, o.length))[1] if scene.get("box") else o.length
+        res.view2d["lines"] += [([0, L0], [c - hw, c - hw]), ([0, L0], [c + hw, c + hw])]
+    x0, x1 = (scene["box"][0], scene["box"][1]) if scene.get("box") else (0.0, o.length)
+    scene["drifts3d"] = [(list(d.exterior.coords), x0, x1) for d in drifts]
 
 
 def _kg_per_blast(res, o):

@@ -84,6 +84,20 @@ def design_drawing(res, title, max_label=400):
         pts.append(out)
     for xs, ys in v.get("lines", []):
         ax.plot(xs, ys, color="#888888", lw=0.6, zorder=2)
+    d = v.get("drill")
+    if d:
+        a = np.asarray(d["drift"])
+        ax.add_patch(MplPolygon(a, closed=True, fc="#dbe9f6", ec="#1f77b4", lw=1.2, zorder=3))
+        pts.append(a)
+        for fx, fy in d.get("feed", []):
+            ax.plot(fx, fy, ls=":", lw=0.6, color="#1f77b4", zorder=3)
+        for cco in d.get("carousels", []):
+            c = np.asarray(cco)
+            ax.plot(c[:, 0], c[:, 1], ls="--", lw=1.0, color="#c2187a", zorder=4)
+        for (pyy, pzz) in d.get("pivots", []):
+            ax.plot([pyy], [pzz], marker="x", ms=8, mew=1.6, color="#c2187a", zorder=7)
+            ax.annotate(f"Pivote h = {pzz:.2f} m", (pyy, pzz), textcoords="offset points", xytext=(6, 6), fontsize=7,
+                        color="#c2187a")
     for name, coords in v.get("openings", []):
         a = np.asarray(coords)
         ax.plot(a[:, 0], a[:, 1], ls=":", lw=0.8, color=_hex(res.zone_colors.get(name, "#999999")), zorder=2)
@@ -162,6 +176,51 @@ def _round_scale(s):
         if s <= v:
             return v
     return int(round(s, -2))
+
+
+def section_drawing(res):
+    """Sección transversal de taladros paralelos con labores de perforación, pivotes y carrusel."""
+    sv = res.p.get("section_view")
+    if not sv:
+        return None
+    fig, ax = plt.subplots(figsize=(10.8, 6.4), dpi=200)
+    st = np.asarray(sv["stope"])
+    ax.add_patch(MplPolygon(st, closed=True, fc="#eeeeee", ec="#222222", lw=1.4))
+    allp = [st]
+    for dco in sv["drifts"]:
+        a = np.asarray(dco)
+        ax.add_patch(MplPolygon(a, closed=True, fc="#dbe9f6", ec="#1f77b4", lw=1.1))
+        allp.append(a)
+    for hx, hy, ok, hid in sv["holes"]:
+        ax.plot(hx, hy, color="#555555" if ok else "#d62728", lw=0.8, ls="-" if ok else "--")
+        ax.text(hx[0], hy[0] + 0.15, str(hid), fontsize=6, ha="center")
+    for cx, cy in sv["charges"]:
+        ax.plot(cx, cy, color="#ff7f0e", lw=2.5)
+    for cco in sv["carousels"]:
+        c = np.asarray(cco)
+        ax.plot(c[:, 0], c[:, 1], ls="--", lw=1.0, color="#c2187a")
+    for pyy, pzz, ok in sv["pivots"]:
+        ax.plot([pyy], [pzz], marker="x", ms=5, mew=1.1, color="#c2187a" if ok else "#d62728")
+    A = np.vstack(allp)
+    x0, z0 = A.min(axis=0)
+    x1, z1 = A.max(axis=0)
+    span = max(x1 - x0, z1 - z0)
+    _dim(ax, tuple(st[3]), tuple(st[2]), -0.05 * span, f"{st[2][0] - st[3][0]:.2f} m")
+    _dim(ax, (st[:, 0].min(), 0), (st[:, 0].min(), sv["H"]), -0.06 * span, f"{sv['H']:.2f} m", horizontal=False)
+    ax.set_aspect("equal")
+    ax.set_xlim(x0 - 0.12 * span, x1 + 0.05 * span)
+    ax.set_ylim(z0 - 0.1 * span, z1 + 0.05 * span)
+    ax.grid(True, lw=0.3, color="#cccccc")
+    ax.tick_params(labelsize=7)
+    ax.set_xlabel("Ancho / potencia y (m)", fontsize=8)
+    ax.set_ylabel("Altura z (m)", fontsize=8)
+    ax.set_title("Sección transversal: labor de perforación, pivote (×) y carrusel (rectángulo); rojo = fuera de alcance",
+                 fontsize=9, loc="left")
+    fig.tight_layout()
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png")
+    plt.close(fig)
+    return buf.getvalue()
 
 
 def charge_columns(res):
@@ -312,6 +371,10 @@ def build_pdf(res, info: dict, params: list, seq=None, energy=None) -> bytes:
                            ("VALIGN", (0, 0), (-1, -1), "MIDDLE")]))
     story.append(t)
     story.append(PageBreak())
+    spng = section_drawing(res)
+    if spng:
+        story.append(Image(io.BytesIO(spng), width=W - 24 * mm, height=(W - 24 * mm) * 6.4 / 10.8 * 0.95))
+        story.append(PageBreak())
 
     # parámetros y resultados
     story.append(Paragraph("Parámetros de diseño y resultados", st_h))

@@ -26,7 +26,8 @@ from core import viz_energy as ve
 from core.avance import CHARGE_METHODS, DESIGNS, AvanceOptions, Drill, run_avance
 from core.common import (CARTRIDGES, EXPLOSIVES, EXSANEL_LP, EXSANEL_MS, FANEL_MS, KONYA_EQS, KONYA_KD, KONYA_KR,
                          KONYA_KS, P80_REFERENCIAS, Rock, make_explosive, ms_por_metro)
-from core.cuts import ANGLED_CUTS, CUT_NOTES, CUT_TYPES, PARALLEL_CUTS
+from core.cuts import CUT_NOTES, CUT_TYPES
+from core.drilling import DrillSetup
 from core.produccion import CE0_TABLE, CRITERIA, DEFAULTS, FAN_STEMMING, PROD_METHODS, ProdOptions, run_produccion
 from core.sections import GALLERY_TYPES, PRESETS, VERTICAL_TYPES, build_section, build_vertical_section
 from core.vertical import CHIMENEA_METHODS, PIQUE_METHODS, VerticalOptions, run_vertical
@@ -287,9 +288,6 @@ try:
                 po.fan_type = st.radio("Abanico", ["Ascendente", "Descendente", "Ambos sentidos"], horizontal=True)
                 if po.fan_type != "Ascendente":
                     po.down_h = st.number_input("Altura del abanico descendente (m)", 1.0, 40.0, 10.0, 0.5)
-                c1, c2 = st.columns(2)
-                po.drift_w = c1.number_input("Ancho de galería (m)", 2.0, 6.0, 4.0, 0.1)
-                po.drift_h = c2.number_input("Alto de galería (m)", 2.0, 6.0, 4.0, 0.1)
                 po.ce0_key = st.selectbox("Tipo de roca (Tabla 24.4)", list(CE0_TABLE), index=1)
                 po.SB = st.slider("S/B (1.3–2)", 1.3, 2.0, 2.0, 0.05)
             if method == PROD_METHODS[3]:
@@ -322,6 +320,46 @@ try:
             with st.sidebar.expander("Ash", expanded=True):
                 po.Kb = st.number_input("Constante Kb", 15.0, 45.0, 30.0, 1.0,
                                         help="Plantilla del curso: 25 (ANFO) y 30 (emulsión).")
+        if method in PROD_METHODS[:4]:
+            with st.sidebar.expander("Labor de perforación y equipo", expanded=False):
+                parallel = method != PROD_METHODS[2]
+                full = False
+                if parallel:
+                    full = st.radio("Perforación desde", ["Galería(s) de perforación", "Cámara de ancho completo"],
+                                    index=0 if method == PROD_METHODS[1] else 1,
+                                    help="LBH y VCR suelen perforarse desde un corte superior de ancho completo; las "
+                                         "vetas angostas, desde una galería sobre la veta.") == "Cámara de ancho completo"
+                dk = st.selectbox("Sección de la labor", GALLERY_TYPES, index=0 if not full else 3, disabled=full,
+                                  key=f"dk{full}")
+                dpre = st.selectbox("Sección típica", list(PRESETS), index=3 if method == PROD_METHODS[1] else 5,
+                                    key=f"dpre{method[:6]}")
+                ddim = PRESETS.get(dpre) or (4.0, 4.0)
+                c1, c2 = st.columns(2)
+                dw = c1.number_input("Ancho (m)", 2.0, 8.0, float(ddim[0]), 0.1, disabled=full, key=f"dw{dpre}")
+                dh = c2.number_input("Alto (m)", 2.0, 8.0, float(ddim[1]), 0.1, key=f"dh{dpre}")
+                dr = st.number_input("Radio del baúl (m)", 0.1, dw / 2, min(1.0, dw / 2), 0.05) \
+                    if dk.startswith("Baúl") and not full else None
+                dtw = st.number_input("Ancho en el techo (m)", 0.5, dw, round(0.8 * dw, 2), 0.05) \
+                    if dk.startswith("Trap") and not full else None
+                st.markdown("**Equipo de perforación**")
+                c1, c2 = st.columns(2)
+                ph = c1.number_input("Altura del pivote (m)", 0.8, 2.5, 1.4, 0.05,
+                                     help="Punto de giro del equipo sobre el piso de la labor: 1.3–1.5 m típico.")
+                py_ = c2.number_input("Pivote: desplazamiento lateral (m)", -3.0, 3.0, 0.0, 0.05) if not parallel else 0.0
+                cw = c1.number_input("Carrusel: ancho (m)", 0.3, 4.0, 1.2, 0.05,
+                                     help="Rectángulo que encierra el carrusel en la sección; varía por equipo "
+                                          "(consulte el catálogo del fabricante).")
+                chh = c2.number_input("Carrusel: alto (m)", 0.2, 3.0, 0.8, 0.05)
+                cdz = c1.number_input("Carrusel: desfase vertical (m)", -1.5, 1.5, 0.0, 0.05,
+                                      help="Posición del centro del rectángulo respecto al pivote.")
+                nd, dy_ = 0, 0.0
+                if parallel and not full:
+                    nd = c2.number_input("N° de galerías (0 = automático)", 0, 10, 0)
+                    if method == PROD_METHODS[1]:
+                        dy_ = st.number_input("Eje de la galería respecto al eje de la veta (m)", -3.0, 3.0, 0.0, 0.05)
+                po.drill = DrillSetup(kind=dk if not full else "Rectangular", width=dw, height=dh, radius=dr, top_w=dtw,
+                                      pivot_h=ph, pivot_y=py_, car_w=cw, car_h=chh, car_dz=cdz, n_drifts=int(nd),
+                                      drift_y=dy_, full_width=full)
         with st.sidebar.expander("Parámetros del esquema", expanded=False):
             c1, c2 = st.columns(2)
             fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
@@ -407,7 +445,7 @@ with tabs[0]:
             with c2.expander("Cueles quemados para labores de 1.0 × 1.5 m"):
                 st.image(str(ASSETS / "cueles_1x1.5.png"), width="stretch")
     log = res.log.df()
-    for fase in log.Fase.unique():
+    for fase in sorted(log.Fase.unique(), key=lambda f: f.split(" ")[0]):
         with st.expander(fase, expanded=True):
             st.dataframe(log[log.Fase == fase].drop(columns="Fase"), hide_index=True, width="stretch")
     if res.p.get("burden_table") is not None:
@@ -599,6 +637,12 @@ with tabs[2]:
     vec = c2.checkbox("Vectores de salida (con secuencia)", False)
     opn = c3.checkbox("Aberturas del cuele", True)
     st.plotly_chart(viz.view_2d(res, label, ss.seq, vec and ss.seq is not None, opn), width="stretch")
+    fsv = viz.section_view(res)
+    if fsv is not None:
+        st.plotly_chart(fsv, width="stretch")
+        st.caption("Cada taladro paralelo se perfora con el pivote sobre la prolongación de su eje, a la altura del "
+                   "pivote sobre el piso de la labor; si el rectángulo del carrusel no cabe en la labor, el taladro "
+                   "queda fuera del alcance (rojo).")
 
 with tabs[3]:
     c1, c2, c3, c4 = st.columns(4)
@@ -833,7 +877,8 @@ with tabs[6]:
         zt = H.groupby("zona", sort=False).agg(Taladros=("id", "count"), Cartuchos=("n_cart", "sum"),
                                               Explosivo=("explosivo", "first"), kg=("kg", "sum"))
         st.dataframe(zt.round(2), width="stretch")
-    cols = ["id", "zona", "x", "y", "X0", "Y0", "Z0", "ux", "uy", "uz", "L", "B", "S", "explosivo", "n_cart", "kg"]
+    cols = ["id", "zona", "x", "y", "X0", "Y0", "Z0", "ux", "uy", "uz", "L", "B", "S", "explosivo", "n_cart", "kg"] + \
+        (["alcance"] if "alcance" in H else [])
     st.dataframe(H[cols].round(3), hide_index=True, width="stretch")
     d1c, d2c, d3c = st.columns(3)
     d1c.download_button("Taladros (CSV)", H[cols].to_csv(index=False).encode("utf-8"), "taladros.csv", "text/csv")

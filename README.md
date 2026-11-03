@@ -73,6 +73,26 @@ streamlit run app.py
   - Exponentes de Kuznetsov calibrables, para la reparametrización con datos de mina.
 - **Daño al macizo:** ley de Devine, PPV = K·(D/√Q)^−α, con la carga por retardo del secuenciamiento. Da el radio en que se supera la VPP crítica y su cuádruplo (plantilla del curso).
 
+### Labor de perforación, pivote y carrusel (taladros largos)
+
+Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en la barra lateral, en el panel "Labor de perforación y equipo".
+
+- **Sección de la labor:** se define igual que en el módulo de avance: baúl, medio punto, herradura, rectangular o trapezoidal, con secciones típicas o medidas propias.
+- **Equipo:**
+  - punto de pivote a una altura sobre el piso (1.3–1.5 m típico; hay advertencia fuera de ese rango);
+  - rectángulo del carrusel (ancho, alto y desfase vertical respecto al pivote), que depende de cada equipo.
+- **Abanicos:**
+  - todos los taladros del anillo salen del pivote;
+  - la boca de cada taladro está donde la recta pivote–fondo corta el contorno de la labor, y la longitud perforada se mide desde esa boca;
+  - la vista 2D muestra la labor, el pivote, el carrusel y la trayectoria pivote–boca;
+  - hay advertencia si el carrusel no cabe en la labor.
+- **Taladros paralelos (LBH, vetas, VCR):**
+  - se perforan desde galería(s) de perforación o desde una cámara de ancho completo; el número de galerías es automático o dato;
+  - para cada taladro, el pivote se ubica sobre la prolongación de su eje, a la altura del pivote sobre el piso de la labor;
+  - si el carrusel no cabe en la labor, el taladro queda "fuera del alcance" (en rojo y con advertencia);
+  - hay una vista adicional en sección transversal en la pestaña Vista 2D y una lámina en el PDF.
+- **Vista 3D:** las labores de perforación se dibujan extruidas a lo largo del tajeo.
+
 ### Pestaña Energía (después de la Vista 3D)
 
 - **Energía por taladro:** Q·e (MJ), energía lineal (MJ/m), MJ/t y kg/t del volumen de influencia. Incluye gráfico de barras por zona.
