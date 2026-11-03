@@ -112,6 +112,8 @@ class ProdOptions:
     Kb: float = 30.0              # Ash
     fan_stem: str = FAN_STEMMING[0]
     drill: DrillSetup | None = None   # labor de perforación, pivote y carrusel (taladros largos)
+    Lmax_ft: float = 102.0        # capacidad de perforación del equipo de taladros largos (Simba)
+    rod_ft: float = 5.0           # longitud de barra
 
 
 def _burden(o: ProdOptions, rock: Rock, ex: Explosive, L, q, f, log, fase):
@@ -352,7 +354,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             dead.append(dpc)
             L = math.hypot(tx - cy, ty - cz)
             if L > 25:
-                res.warnings.append("Hay taladros de más de 25 m: requieren sistemas de orientación (LJ).")
+                res.warnings.append("Hay taladros de más de 25 m: LJ recomienda sistemas de orientación para controlar "
+                                    "la desviación.")
             da = min([abs(angs[j] - angs[k]) for k in (j - 1, j + 1) if 0 <= k < len(angs)] or [0.5])
             if o.fan_stem.startswith("Ts"):
                 s0, stem_lab = ring_stemming(j, D, L)
@@ -543,6 +546,17 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             res.warnings.append(f"Desviación de {o.alpha * 100:.1f} % en taladros de {Lmax:.0f} m: el curso de taladros "
                                 f"largos considera aceptable 2–3 % (en frentes se tolera hasta 5 %).")
         res.p["burden_table"] = burden_table(rock, ex, o, Lmax, q)
+        if m in PROD_METHODS[:4]:
+            Lcap = o.Lmax_ft * 0.3048
+            n_over = int((res.holes.L > Lcap + 1e-6).sum())
+            lg.add("2b. Control de desviación", "Capacidad de perforación del equipo", "L_máx", Lcap, "m",
+                   f"{o.Lmax_ft:.0f} pies (Simba)")
+            lg.add("2b. Control de desviación", "Barras para el taladro más largo", "n", math.ceil(Lmax / (o.rod_ft * 0.3048)),
+                   "", f"barras de {o.rod_ft:.0f} pies")
+            if n_over:
+                res.warnings.append(f"{n_over} taladro(s) superan la capacidad del equipo ({o.Lmax_ft:.0f} pies = {Lcap:.1f} m; "
+                                    f"el más largo mide {Lmax:.1f} m): reduzca la altura entre subniveles, agregue un "
+                                    f"subnivel intermedio o perfore desde ambos niveles.")
     if m == PROD_METHODS[2]:
         lg.add("2c. Tiempos (Onederra y Chitombo 2007)", "Retardo entre taladros de un anillo", "Δt",
                "3–15 ms/m de burden; cooperación óptima 5–25 ms", "", "")

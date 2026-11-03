@@ -93,6 +93,21 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - hay una vista adicional en sección transversal en la pestaña Vista 2D y una lámina en el PDF.
 - **Vista 3D:** las labores de perforación se dibujan extruidas a lo largo del tajeo.
 
+### Chimenea slot con Simba (producción) y capacidad del equipo
+
+- **Método nuevo en Producción: "Chimenea slot con Simba (taladros largos)".** Basado en las plantillas del curso de cálculos de perforación y voladura (sesiones 7, 8 y 16).
+  - **Sección:** rectangular o circular (2 × 2 m por defecto), con longitud igual a la altura entre subniveles. La perforación puede ser descendente o ascendente.
+  - **Cuele:** vacíos de 4" y cargados de 2.5", con las proporciones de Konya: B1 = 1.5·D_H, B_n = S_c(n−1) y taco por cuadro. Como alternativa, el cuele de López Jimeno §3.2-A.
+  - **Contorno:** taladros cuadradores simétricos (8 en una sección de 2 × 2 m, como la plantilla).
+  - **Voladura:** por tramos, integral, o integral con cargas espaciadas por tacos intermedios. Incluye booster por carga.
+  - **Esponjamiento:** el volumen roto esponjado (30 %) se compara con el volumen disponible en la labor inferior.
+  - **Ensanche opcional a cámara slot** (sesión 8), con el burden de Konya.
+  - **KPI:** índice de perforación (t/m), barras por taladro, factor de carga y costos.
+- **Capacidad del equipo:** Simba, por defecto 102 pies (≈ 31.1 m), con barras de 4–6 pies. Se aplica en LBH, vetas angostas, abanicos, VCR, chimenea slot y chimenea por taladros largos.
+  - La memoria indica la capacidad y las barras del taladro más largo.
+  - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
+  - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
+
 ### Pestaña Energía (después de la Vista 3D)
 
 - **Energía por taladro:** Q·e (MJ), energía lineal (MJ/m), MJ/t y kg/t del volumen de influencia. Incluye gráfico de barras por zona.

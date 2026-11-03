@@ -98,6 +98,7 @@ class VerticalOptions:
     inclin_deg: float = 60.0      # inclinación de barrenos del cuele (desde la horizontal) en piques
     B_override: float | None = None
     SB: float = 1.25
+    Lmax_ft: float = 102.0        # capacidad del equipo de taladros largos (Simba)
 
 
 def _layout_face(vs, opening, cut_holes, relief, B_ring, SB, contour_S, contour_B, offset, center=(0, 0)):
@@ -265,6 +266,11 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
             P.setdefault("adv", tr)
             blk_frag = dict(B=S_fr, S=S_fr, q=q_dest, Lc=tr - 0.3, H=tr, Q=q_dest * (tr - 0.3))
             res.warnings.append("Desviación de perforación: mantener < 2 % (martillo en cabeza) o < 1 % (fondo) — LJ.")
+            lg.add(F1, "Capacidad de perforación del equipo", "L_máx", o.Lmax_ft * 0.3048, "m", f"{o.Lmax_ft:.0f} pies")
+            if L > o.Lmax_ft * 0.3048 and o.method != CHIMENEA_METHODS[6]:
+                res.warnings.append(f"La chimenea de {L:.1f} m supera la capacidad del equipo ({o.Lmax_ft:.0f} pies = "
+                                    f"{o.Lmax_ft * 0.3048:.1f} m): divídala con un subnivel intermedio o perfore desde "
+                                    "ambos niveles.")
         Lh = L
     else:
         # métodos con frente (ascendentes manuales/Jora/Alimak y piques)

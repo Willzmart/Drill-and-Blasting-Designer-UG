@@ -123,12 +123,16 @@ def design_drawing(res, title, max_label=400):
         for _, r in h.iterrows():
             ax.text(r.x + rmark * 0.9, r.y + rmark * 0.9, str(int(r.id)), fontsize=fs, zorder=6, color="#111111")
     # cotas generales
-    x0, y0 = allp.min(axis=0)
-    x1, y1 = allp.max(axis=0)
+    for xs, ys in v.get("lines", []):
+        allp = np.vstack([allp, np.c_[xs, ys]])
+    span = float(max(np.ptp(allp[:, 0]), np.ptp(allp[:, 1]), 0.5))
+    X0, Y0 = allp.min(axis=0)
+    X1, Y1 = allp.max(axis=0)
+    x0, y0, x1, y1 = X0, Y0, X1, Y1
     if out is not None:
         x0, y0 = out.min(axis=0)
         x1, y1 = out.max(axis=0)
-    off = 0.07 * span
+    off = min(0.07 * span, 0.18 * max(x1 - x0, y1 - y0))
     _dim(ax, (x0, y0), (x1, y0), -off, f"{x1 - x0:.2f} m")
     _dim(ax, (x0, y0), (x0, y1), -off, f"{y1 - y0:.2f} m", horizontal=False)
     # cotas del cuele (avance) o de la primera fila
@@ -143,11 +147,11 @@ def design_drawing(res, title, max_label=400):
     ax.plot([0], [0], marker="o", ms=5, mfc="white", mec="#1f3b73", zorder=8)
     ax.annotate("(0, 0)", (0, 0), textcoords="offset points", xytext=(4, -10), fontsize=7, color="#1f3b73")
     ax.set_aspect("equal")
-    ax.set_xlim(x0 - 2 * off, x1 + 2.2 * off)
-    ax.set_ylim(y0 - 2 * off, y1 + 1.5 * off)
+    ax.set_xlim(min(x0, X0) - 2 * off, max(x1, X1) + 2.2 * off)
+    ax.set_ylim(min(y0, Y0) - 2 * off, max(y1, Y1) + 1.5 * off)
     step = _nice_step(span)
-    ax.set_xticks(np.arange(math.floor(x0 / step) * step, x1 + step, step))
-    ax.set_yticks(np.arange(math.floor(y0 / step) * step, y1 + step, step))
+    ax.set_xticks(np.arange(math.floor(min(x0, X0) / step) * step, max(x1, X1) + step, step))
+    ax.set_yticks(np.arange(math.floor(min(y0, Y0) / step) * step, max(y1, Y1) + step, step))
     ax.grid(True, lw=0.3, color="#cccccc")
     ax.tick_params(labelsize=7)
     ax.set_xlabel(v.get("xlabel", "x (m)"), fontsize=8)
@@ -160,7 +164,7 @@ def design_drawing(res, title, max_label=400):
     fig.savefig(buf, format="png")
     plt.close(fig)
     # escala: ancho útil del dibujo en el papel ≈ 200 mm
-    scale = (x1 - x0 + 4.2 * off) * 1000 / 200
+    scale = (max(x1, X1) - min(x0, X0) + 4.2 * off) * 1000 / 200
     return buf.getvalue(), _round_scale(scale)
 
 

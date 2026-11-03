@@ -28,6 +28,9 @@ from core.common import (CARTRIDGES, EXPLOSIVES, EXSANEL_LP, EXSANEL_MS, FANEL_M
                          KONYA_KS, P80_REFERENCIAS, Rock, make_explosive, ms_por_metro)
 from core.cuts import CUT_NOTES, CUT_TYPES
 from core.drilling import DrillSetup
+from core.slot import SLOT_BLAST, SLOT_CUTS, SLOT_DIR, SlotOptions, run_slot
+
+SLOT_METHOD = "Chimenea slot con Simba (taladros largos)"
 from core.produccion import CE0_TABLE, CRITERIA, DEFAULTS, FAN_STEMMING, PROD_METHODS, ProdOptions, run_produccion
 from core.sections import GALLERY_TYPES, PRESETS, VERTICAL_TYPES, build_section, build_vertical_section
 from core.vertical import CHIMENEA_METHODS, PIQUE_METHODS, VerticalOptions, run_vertical
@@ -98,6 +101,60 @@ with st.sidebar.expander("Costos unitarios", expanded=False):
     cost = dict(drill=st.number_input("Perforación (US$/m)", 0.0, 100.0, 2.5, 0.1),
                 exp=st.number_input("Explosivo (US$/kg)", 0.0, 50.0, 4.0, 0.1),
                 acc=st.number_input("Accesorios por taladro (US$)", 0.0, 100.0, 3.0, 0.1))
+
+def slot_sidebar():
+    """Barra lateral y cálculo de la chimenea slot con Simba (producción)."""
+    so = SlotOptions()
+    with st.sidebar.expander("Chimenea slot", expanded=True):
+        so.kind = st.selectbox("Sección", VERTICAL_TYPES, index=0, key="sl_kind")
+        c1, c2 = st.columns(2)
+        so.a = c1.number_input("Lado x / diámetro (m)", 1.2, 6.0, 2.0, 0.1, key="sl_a")
+        so.b = c2.number_input("Lado y (m)", 1.2, 6.0, so.a, 0.1, key="sl_b") if so.kind.startswith("Rect") else so.a
+        so.L = c1.number_input("Longitud (altura entre subniveles, m)", 5.0, 80.0, 20.0, 0.5, key="sl_L")
+        so.direction = st.radio("Perforación", SLOT_DIR, key="sl_dir")
+        so.cut = st.selectbox("Diseño del cuele", SLOT_CUTS, key="sl_cut")
+        so.blast = st.selectbox("Voladura", SLOT_BLAST, key="sl_bl",
+                                help="Sesión 16 del curso: VCR/por tramos, integral o integral en 2–3 tramos con tacos "
+                                     "intermedios.")
+        c1, c2 = st.columns(2)
+        if so.blast.startswith("Por tramos"):
+            so.tramo = c1.number_input("Altura del tramo (m)", 1.0, 8.0, 3.0, 0.5, key="sl_tr")
+            so.T_collar = c2.number_input("Retacado (m)", 0.2, 3.0, 0.5, 0.1, key="sl_tc")
+        else:
+            so.T_fondo = c1.number_input("Taco de fondo y boca (m)", 0.3, 4.0, 1.0, 0.1, key="sl_tf")
+            if "espaciadas" in so.blast:
+                so.n_tramos = c2.number_input("N° de cargas", 2, 4, 2, key="sl_nt")
+                so.T_inter = c1.number_input("Taco intermedio (m)", 0.5, 5.0, 2.0, 0.1, key="sl_ti")
+        so.booster_kg = c2.number_input("Booster por carga (kg)", 0.0, 1.0, 0.15, 0.01, key="sl_bo")
+    with st.sidebar.expander("Perforación (Simba) y explosivo", expanded=False):
+        c1, c2 = st.columns(2)
+        so.D1_mm = c1.number_input("Ø cargados (mm)", 45.0, 115.0, 63.5, 0.5, key="sl_d1")
+        so.D2_mm = c2.number_input("Ø vacíos (mm)", 64.0, 203.0, 101.6, 0.5, key="sl_d2")
+        so.NB = c1.number_input("N° de vacíos", 1, 4, 2, key="sl_nb")
+        so.alpha = c2.number_input("Desviación (m/m)", 0.0, 0.05, 0.01, 0.005, key="sl_al")
+        so.Lmax_ft = c1.number_input("Capacidad del equipo (pies)", 30.0, 200.0, 102.0, 1.0, key="sl_lm",
+                                     help="Simba: hasta 102 pies (≈ 31.1 m) con barras de extensión.")
+        so.rod_ft = c2.number_input("Barra (pies)", 4.0, 6.0, 5.0, 1.0, key="sl_rod")
+        sx = explosive_picker("Explosivo", "ANFO (granel)", '1 1/4" x 12"', "slx")
+    with st.sidebar.expander("Esponjamiento y ensanche", expanded=False):
+        c1, c2 = st.columns(2)
+        so.swell = c1.slider("Esponjamiento (%)", 10, 60, 30, key="sl_sw") / 100
+        so.L_exp = c2.number_input("Long. de expansión (m)", 1.0, 30.0, 4.0, 0.5, key="sl_le",
+                                   help="Tramo de la labor inferior que recibe el material volado.")
+        so.drift_w = c1.number_input("Ancho labor inferior (m)", 2.0, 8.0, 4.0, 0.1, key="sl_dw")
+        so.drift_h = c2.number_input("Alto labor inferior (m)", 2.0, 8.0, 4.0, 0.1, key="sl_dh")
+        so.widen = st.checkbox("Ensanchar a cámara slot (sesión 8)", False, key="sl_wd")
+        if so.widen:
+            so.slot_len = c1.number_input("Largo del slot (m)", 3.0, 40.0, 8.0, 0.5, key="sl_sl")
+            so.slot_w = c2.number_input("Ancho del slot (m)", 2.0, 10.0, 4.0, 0.5, key="sl_sw2")
+            so.SB = st.slider("S/B del ensanche", 1.0, 1.2, 1.1, 0.05, key="sl_sb")
+    r = run_slot(rock, sx, so, cost)
+    params = [("Método", SLOT_METHOD), ("Sección", f"{so.kind} {so.a:.2f} × {so.b:.2f} m"), ("Longitud", f"{so.L:.1f} m"),
+              ("Perforación", so.direction), ("Cuele", so.cut), ("Voladura", so.blast),
+              ("Ø cargados / vacíos", f"{so.D1_mm:.1f} / {so.D2_mm:.1f} mm × {so.NB}"),
+              ("Equipo", f"Simba, capacidad {so.Lmax_ft:.0f} pies, barra {so.rod_ft:.0f} pies"), ("Explosivo", sx.label())]
+    return r, sx, [sx], params
+
 
 # ---------------------------------------------------------------------------
 res = None
@@ -211,6 +268,8 @@ try:
             long_m = labor == "Chimenea" and method in CHIMENEA_METHODS[3:]
             length = st.number_input("Longitud de la chimenea (m)", 5.0, 150.0, 30.0, 1.0) if long_m else 30.0
             tramo = st.number_input("Altura de cada pega (m)", 1.0, 6.0, 3.0, 0.5) if long_m else 3.0
+            lmax_v = st.number_input("Capacidad del equipo (pies)", 30.0, 200.0, 102.0, 1.0,
+                                     help="Simba: hasta 102 pies (≈ 31.1 m).") if long_m else 102.0
             cut_o = None
             if not long_m and method not in (PIQUE_METHODS[0], PIQUE_METHODS[1], PIQUE_METHODS[5]):
                 if st.checkbox("Elegir otro cuele", False):
@@ -247,7 +306,7 @@ try:
         vo = VerticalOptions(method=method, cut_type=cut_o, d1_mm=vd1, d2_mm=vd2, NB=int(vNB), bar_m=vbar * 0.3048,
                              eff=veff / 100, F=vF, length=length, tramo=tramo, contour=contour, d_central=dcen, Et=Et_v,
                              delta_o=dlo_v, k_vcr=kv, ratio_bloque=ratio_blk, inclin_deg=incl, B_override=ov[0],
-                             SB=ov[1] or 1.25)
+                             SB=ov[1] or 1.25, Lmax_ft=lmax_v)
         res = run_vertical(labor, vs, rock, vexp, vo, cost)
         main_exp = vexp
         used_exps = [vexp]
@@ -255,139 +314,148 @@ try:
                       ("Ø producción / vacío", f"{vd1:.0f} / {vd2:.0f} mm × {int(vNB)}"), ("Barra", f"{vbar:.1f} pies"),
                       ("Explosivo", vexp.label()), ("Contorno", contour)]
     else:
-        with st.sidebar.expander("Método de explotación", expanded=True):
-            method = st.selectbox("Método", PROD_METHODS)
-            Dd, crit_d = DEFAULTS[method]
-            criterion = st.selectbox("Criterio de burden", CRITERIA, index=CRITERIA.index(crit_d))
-            po = ProdOptions(method=method, criterion=criterion)
-            c1, c2 = st.columns(2)
-            po.D_mm = c1.number_input("Ø perforación (mm)", 25.0, 250.0, float(Dd), 1.0)
-            geo = {PROD_METHODS[0]: (30.0, 15.0, 40.0), PROD_METHODS[1]: (20.0, 1.5, 15.0),
-                   PROD_METHODS[2]: (20.0, 12.0, 15.0), PROD_METHODS[3]: (20.0, 8.0, 40.0),
-                   PROD_METHODS[4]: (20.0, 8.0, 6.0), PROD_METHODS[5]: (4.0, 8.0, 5.0),
-                   PROD_METHODS[6]: (15.0, 2.0, 3.0), PROD_METHODS[7]: (4.0, 2.0, 4.0),
-                   PROD_METHODS[8]: (20.0, 15.0, 30.0)}[method]
-            lab_len = "Longitud de barreno (m)" if method in (PROD_METHODS[5], PROD_METHODS[7]) else "Largo del tajeo (m)"
-            po.length = c2.number_input(lab_len, 1.0, 300.0, geo[0], 0.5)
-            lab_w = {PROD_METHODS[4]: "Ancho de cámara (m)", PROD_METHODS[5]: "Ancho de cámara (m)"}.get(
-                method, "Potencia / ancho AV (m)")
-            wv = c1.number_input(lab_w, 0.5, 100.0, geo[1], 0.1)
-            if method in (PROD_METHODS[4], PROD_METHODS[5]):
-                po.room = wv
-            po.width = wv
-            lab_h = {PROD_METHODS[2]: "Altura del abanico ascendente (m)", PROD_METHODS[4]: "Altura del banco (m)",
-                     PROD_METHODS[5]: "Altura del banco (m)", PROD_METHODS[6]: "Altura de la tajada (m)",
-                     PROD_METHODS[7]: "Altura de la tajada (m)", PROD_METHODS[8]: "Altura total de la cámara (m)"}.get(
-                method, "Altura entre niveles (m)")
-            hv = c2.number_input(lab_h, 1.0, 120.0, geo[2], 0.5)
-            po.height = hv
-            po.up_h = hv
-            if method == PROD_METHODS[1]:
-                po.dip_deg = st.slider("Buzamiento de la veta (°)", 45, 90, 90)
-            if method == PROD_METHODS[2]:
-                po.fan_type = st.radio("Abanico", ["Ascendente", "Descendente", "Ambos sentidos"], horizontal=True)
-                if po.fan_type != "Ascendente":
-                    po.down_h = st.number_input("Altura del abanico descendente (m)", 1.0, 40.0, 10.0, 0.5)
-                po.ce0_key = st.selectbox("Tipo de roca (Tabla 24.4)", list(CE0_TABLE), index=1)
-                po.SB = st.slider("S/B (1.3–2)", 1.3, 2.0, 2.0, 0.05)
-            if method == PROD_METHODS[3]:
-                po.k_vcr = st.number_input("S / D_o", 0.6, 1.5, 1.0, 0.05)
-                po.Et = st.number_input("E_t", 0.8, 3.0, 1.5, 0.05)
-                po.delta_o = st.number_input("Δ_o", 0.3, 0.8, 0.5, 0.05)
-                po.corona = st.number_input("Altura del pilar corona (m)", 1.0, 20.0, 6.0, 0.5)
-            if method == PROD_METHODS[4]:
-                po.pillar = st.number_input("Lado del pilar (m)", 2.0, 30.0, 6.0, 0.5)
-            if method == PROD_METHODS[6]:
-                po.incl_deg = st.slider("Inclinación de los barrenos (°)", 50, 65, 60)
-            if method == PROD_METHODS[8]:
-                po.phase_h = st.number_input("Altura de cada banco (m)", 2.0, 20.0, 8.0, 0.5)
-                po.orient_h = st.radio("Banqueo", ["Vertical (50–65 mm)", "Horizontal (32–45 mm)"]) .startswith("Horiz")
-            if method == PROD_METHODS[2]:
-                po.fan_stem = st.selectbox("Retacado de los anillos", FAN_STEMMING)
-        if criterion.startswith("Konya"):
-            with st.sidebar.expander("Konya: ecuación y correcciones", expanded=True):
-                po.konya_eq = st.selectbox("Ecuación del burden", KONYA_EQS)
-                if "6.3" in po.konya_eq:
-                    po.stv = st.number_input("Potencia relativa por volumen Stv (ANFO = 100)", 50.0, 250.0, 100.0, 5.0)
-                po.Kd = KONYA_KD[st.selectbox("Kd — orientación de los estratos (Tabla 6.3)", list(KONYA_KD), index=2)]
-                po.Ks = KONYA_KS[st.selectbox("Ks — estructura geológica (Tabla 6.4)", list(KONYA_KS), index=1)]
-                po.Kr = KONYA_KR[st.selectbox("Kr — número de hileras (Tabla 6.2)", list(KONYA_KR), index=0)]
-                po.konya_delayed = st.radio("Iniciación entre taladros de una fila", ["Retardada", "Instantánea"],
-                                            horizontal=True) == "Retardada"
-                po.konya_S = st.checkbox("Espaciamiento por la relación de rigidez L/B (ecs. 7.1–7.4)", True)
-                st.caption("Taco T = 0.7·B (ec. 6.4); sobreperforación J = 0.3·B (ec. 6.6) en bancos.")
-        elif criterion.startswith("Ash"):
-            with st.sidebar.expander("Ash", expanded=True):
-                po.Kb = st.number_input("Constante Kb", 15.0, 45.0, 30.0, 1.0,
-                                        help="Plantilla del curso: 25 (ANFO) y 30 (emulsión).")
-        if method in PROD_METHODS[:4]:
-            with st.sidebar.expander("Labor de perforación y equipo", expanded=False):
-                parallel = method != PROD_METHODS[2]
-                full = False
-                if parallel:
-                    full = st.radio("Perforación desde", ["Galería(s) de perforación", "Cámara de ancho completo"],
-                                    index=0 if method == PROD_METHODS[1] else 1,
-                                    help="LBH y VCR suelen perforarse desde un corte superior de ancho completo; las "
-                                         "vetas angostas, desde una galería sobre la veta.") == "Cámara de ancho completo"
-                dk = st.selectbox("Sección de la labor", GALLERY_TYPES, index=0 if not full else 3, disabled=full,
-                                  key=f"dk{full}")
-                dpre = st.selectbox("Sección típica", list(PRESETS), index=3 if method == PROD_METHODS[1] else 5,
-                                    key=f"dpre{method[:6]}")
-                ddim = PRESETS.get(dpre) or (4.0, 4.0)
+        method = st.sidebar.selectbox("Método", PROD_METHODS + [SLOT_METHOD])
+        if method == SLOT_METHOD:
+            res, main_exp, used_exps, pdf_params = slot_sidebar()
+            key = f"Producción|{method}"
+        else:
+            with st.sidebar.expander("Método de explotación", expanded=True):
+                Dd, crit_d = DEFAULTS[method]
+                criterion = st.selectbox("Criterio de burden", CRITERIA, index=CRITERIA.index(crit_d))
+                po = ProdOptions(method=method, criterion=criterion)
                 c1, c2 = st.columns(2)
-                dw = c1.number_input("Ancho (m)", 2.0, 8.0, float(ddim[0]), 0.1, disabled=full, key=f"dw{dpre}")
-                dh = c2.number_input("Alto (m)", 2.0, 8.0, float(ddim[1]), 0.1, key=f"dh{dpre}")
-                dr = st.number_input("Radio del baúl (m)", 0.1, dw / 2, min(1.0, dw / 2), 0.05) \
-                    if dk.startswith("Baúl") and not full else None
-                dtw = st.number_input("Ancho en el techo (m)", 0.5, dw, round(0.8 * dw, 2), 0.05) \
-                    if dk.startswith("Trap") and not full else None
-                st.markdown("**Equipo de perforación**")
+                po.D_mm = c1.number_input("Ø perforación (mm)", 25.0, 250.0, float(Dd), 1.0)
+                geo = {PROD_METHODS[0]: (30.0, 15.0, 30.0), PROD_METHODS[1]: (20.0, 1.5, 15.0),
+                       PROD_METHODS[2]: (20.0, 12.0, 15.0), PROD_METHODS[3]: (20.0, 8.0, 30.0),
+                       PROD_METHODS[4]: (20.0, 8.0, 6.0), PROD_METHODS[5]: (4.0, 8.0, 5.0),
+                       PROD_METHODS[6]: (15.0, 2.0, 3.0), PROD_METHODS[7]: (4.0, 2.0, 4.0),
+                       PROD_METHODS[8]: (20.0, 15.0, 30.0)}[method]
+                lab_len = "Longitud de barreno (m)" if method in (PROD_METHODS[5], PROD_METHODS[7]) else "Largo del tajeo (m)"
+                po.length = c2.number_input(lab_len, 1.0, 300.0, geo[0], 0.5)
+                lab_w = {PROD_METHODS[4]: "Ancho de cámara (m)", PROD_METHODS[5]: "Ancho de cámara (m)"}.get(
+                    method, "Potencia / ancho AV (m)")
+                wv = c1.number_input(lab_w, 0.5, 100.0, geo[1], 0.1)
+                if method in (PROD_METHODS[4], PROD_METHODS[5]):
+                    po.room = wv
+                po.width = wv
+                lab_h = {PROD_METHODS[2]: "Altura del abanico ascendente (m)", PROD_METHODS[4]: "Altura del banco (m)",
+                         PROD_METHODS[5]: "Altura del banco (m)", PROD_METHODS[6]: "Altura de la tajada (m)",
+                         PROD_METHODS[7]: "Altura de la tajada (m)", PROD_METHODS[8]: "Altura total de la cámara (m)"}.get(
+                    method, "Altura entre niveles (m)")
+                hv = c2.number_input(lab_h, 1.0, 120.0, geo[2], 0.5)
+                po.height = hv
+                po.up_h = hv
+                if method == PROD_METHODS[1]:
+                    po.dip_deg = st.slider("Buzamiento de la veta (°)", 45, 90, 90)
+                if method == PROD_METHODS[2]:
+                    po.fan_type = st.radio("Abanico", ["Ascendente", "Descendente", "Ambos sentidos"], horizontal=True)
+                    if po.fan_type != "Ascendente":
+                        po.down_h = st.number_input("Altura del abanico descendente (m)", 1.0, 40.0, 10.0, 0.5)
+                    po.ce0_key = st.selectbox("Tipo de roca (Tabla 24.4)", list(CE0_TABLE), index=1)
+                    po.SB = st.slider("S/B (1.3–2)", 1.3, 2.0, 2.0, 0.05)
+                if method == PROD_METHODS[3]:
+                    po.k_vcr = st.number_input("S / D_o", 0.6, 1.5, 1.0, 0.05)
+                    po.Et = st.number_input("E_t", 0.8, 3.0, 1.5, 0.05)
+                    po.delta_o = st.number_input("Δ_o", 0.3, 0.8, 0.5, 0.05)
+                    po.corona = st.number_input("Altura del pilar corona (m)", 1.0, 20.0, 6.0, 0.5)
+                if method == PROD_METHODS[4]:
+                    po.pillar = st.number_input("Lado del pilar (m)", 2.0, 30.0, 6.0, 0.5)
+                if method == PROD_METHODS[6]:
+                    po.incl_deg = st.slider("Inclinación de los barrenos (°)", 50, 65, 60)
+                if method == PROD_METHODS[8]:
+                    po.phase_h = st.number_input("Altura de cada banco (m)", 2.0, 20.0, 8.0, 0.5)
+                    po.orient_h = st.radio("Banqueo", ["Vertical (50–65 mm)", "Horizontal (32–45 mm)"]) .startswith("Horiz")
+                if method == PROD_METHODS[2]:
+                    po.fan_stem = st.selectbox("Retacado de los anillos", FAN_STEMMING)
+            if criterion.startswith("Konya"):
+                with st.sidebar.expander("Konya: ecuación y correcciones", expanded=True):
+                    po.konya_eq = st.selectbox("Ecuación del burden", KONYA_EQS)
+                    if "6.3" in po.konya_eq:
+                        po.stv = st.number_input("Potencia relativa por volumen Stv (ANFO = 100)", 50.0, 250.0, 100.0, 5.0)
+                    po.Kd = KONYA_KD[st.selectbox("Kd — orientación de los estratos (Tabla 6.3)", list(KONYA_KD), index=2)]
+                    po.Ks = KONYA_KS[st.selectbox("Ks — estructura geológica (Tabla 6.4)", list(KONYA_KS), index=1)]
+                    po.Kr = KONYA_KR[st.selectbox("Kr — número de hileras (Tabla 6.2)", list(KONYA_KR), index=0)]
+                    po.konya_delayed = st.radio("Iniciación entre taladros de una fila", ["Retardada", "Instantánea"],
+                                                horizontal=True) == "Retardada"
+                    po.konya_S = st.checkbox("Espaciamiento por la relación de rigidez L/B (ecs. 7.1–7.4)", True)
+                    st.caption("Taco T = 0.7·B (ec. 6.4); sobreperforación J = 0.3·B (ec. 6.6) en bancos.")
+            elif criterion.startswith("Ash"):
+                with st.sidebar.expander("Ash", expanded=True):
+                    po.Kb = st.number_input("Constante Kb", 15.0, 45.0, 30.0, 1.0,
+                                            help="Plantilla del curso: 25 (ANFO) y 30 (emulsión).")
+            if method in PROD_METHODS[:4]:
+                with st.sidebar.expander("Labor de perforación y equipo", expanded=False):
+                    parallel = method != PROD_METHODS[2]
+                    full = False
+                    if parallel:
+                        full = st.radio("Perforación desde", ["Galería(s) de perforación", "Cámara de ancho completo"],
+                                        index=0 if method == PROD_METHODS[1] else 1,
+                                        help="LBH y VCR suelen perforarse desde un corte superior de ancho completo; las "
+                                             "vetas angostas, desde una galería sobre la veta.") == "Cámara de ancho completo"
+                    dk = st.selectbox("Sección de la labor", GALLERY_TYPES, index=0 if not full else 3, disabled=full,
+                                      key=f"dk{full}")
+                    dpre = st.selectbox("Sección típica", list(PRESETS), index=3 if method == PROD_METHODS[1] else 5,
+                                        key=f"dpre{method[:6]}")
+                    ddim = PRESETS.get(dpre) or (4.0, 4.0)
+                    c1, c2 = st.columns(2)
+                    dw = c1.number_input("Ancho (m)", 2.0, 8.0, float(ddim[0]), 0.1, disabled=full, key=f"dw{dpre}")
+                    dh = c2.number_input("Alto (m)", 2.0, 8.0, float(ddim[1]), 0.1, key=f"dh{dpre}")
+                    dr = st.number_input("Radio del baúl (m)", 0.1, dw / 2, min(1.0, dw / 2), 0.05) \
+                        if dk.startswith("Baúl") and not full else None
+                    dtw = st.number_input("Ancho en el techo (m)", 0.5, dw, round(0.8 * dw, 2), 0.05) \
+                        if dk.startswith("Trap") and not full else None
+                    st.markdown("**Equipo de perforación**")
+                    c1, c2 = st.columns(2)
+                    ph = c1.number_input("Altura del pivote (m)", 0.8, 2.5, 1.4, 0.05,
+                                         help="Punto de giro del equipo sobre el piso de la labor: 1.3–1.5 m típico.")
+                    py_ = c2.number_input("Pivote: desplazamiento lateral (m)", -3.0, 3.0, 0.0, 0.05) if not parallel else 0.0
+                    cw = c1.number_input("Carrusel: ancho (m)", 0.3, 4.0, 1.2, 0.05,
+                                         help="Rectángulo que encierra el carrusel en la sección; varía por equipo "
+                                              "(consulte el catálogo del fabricante).")
+                    chh = c2.number_input("Carrusel: alto (m)", 0.2, 3.0, 0.8, 0.05)
+                    cdz = c1.number_input("Carrusel: desfase vertical (m)", -1.5, 1.5, 0.0, 0.05,
+                                          help="Posición del centro del rectángulo respecto al pivote.")
+                    nd, dy_ = 0, 0.0
+                    if parallel and not full:
+                        nd = c2.number_input("N° de galerías (0 = automático)", 0, 10, 0)
+                        if method == PROD_METHODS[1]:
+                            dy_ = st.number_input("Eje de la galería respecto al eje de la veta (m)", -3.0, 3.0, 0.0, 0.05)
+                    st.markdown("**Capacidad del equipo de taladros largos**")
+                    c1, c2 = st.columns(2)
+                    po.Lmax_ft = c1.number_input("Longitud máxima (pies)", 30.0, 200.0, 102.0, 1.0,
+                                                 help="Simba: hasta 102 pies (≈ 31.1 m) con barras de extensión.")
+                    po.rod_ft = c2.number_input("Barra (pies)", 4.0, 6.0, 5.0, 1.0)
+                    po.drill = DrillSetup(kind=dk if not full else "Rectangular", width=dw, height=dh, radius=dr, top_w=dtw,
+                                          pivot_h=ph, pivot_y=py_, car_w=cw, car_h=chh, car_dz=cdz, n_drifts=int(nd),
+                                          drift_y=dy_, full_width=full)
+            with st.sidebar.expander("Parámetros del esquema", expanded=False):
                 c1, c2 = st.columns(2)
-                ph = c1.number_input("Altura del pivote (m)", 0.8, 2.5, 1.4, 0.05,
-                                     help="Punto de giro del equipo sobre el piso de la labor: 1.3–1.5 m típico.")
-                py_ = c2.number_input("Pivote: desplazamiento lateral (m)", -3.0, 3.0, 0.0, 0.05) if not parallel else 0.0
-                cw = c1.number_input("Carrusel: ancho (m)", 0.3, 4.0, 1.2, 0.05,
-                                     help="Rectángulo que encierra el carrusel en la sección; varía por equipo "
-                                          "(consulte el catálogo del fabricante).")
-                chh = c2.number_input("Carrusel: alto (m)", 0.2, 3.0, 0.8, 0.05)
-                cdz = c1.number_input("Carrusel: desfase vertical (m)", -1.5, 1.5, 0.0, 0.05,
-                                      help="Posición del centro del rectángulo respecto al pivote.")
-                nd, dy_ = 0, 0.0
-                if parallel and not full:
-                    nd = c2.number_input("N° de galerías (0 = automático)", 0, 10, 0)
-                    if method == PROD_METHODS[1]:
-                        dy_ = st.number_input("Eje de la galería respecto al eje de la veta (m)", -3.0, 3.0, 0.0, 0.05)
-                po.drill = DrillSetup(kind=dk if not full else "Rectangular", width=dw, height=dh, radius=dr, top_w=dtw,
-                                      pivot_h=ph, pivot_y=py_, car_w=cw, car_h=chh, car_dz=cdz, n_drifts=int(nd),
-                                      drift_y=dy_, full_width=full)
-        with st.sidebar.expander("Parámetros del esquema", expanded=False):
-            c1, c2 = st.columns(2)
-            fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
-            po.f = c1.number_input("Factor de fijación f", 0.8, 1.6, fdef, 0.05,
-                                   help="Langefors: vertical 1.0; 3:1 0.9; 2:1 0.85. Holmberg: arriba/horizontal 1.45; abajo 1.20")
-            if method != PROD_METHODS[2]:
-                po.SB = c2.number_input("S/B", 1.0, 2.0, 1.25, 0.05)
-            po.rows_blast = c1.number_input("Filas por voladura", 1, 50, 3)
-            po.col_ratio = c2.number_input("Columna / fondo", 0.3, 1.0, 0.5 if method != PROD_METHODS[2] else 0.6, 0.05)
-            po.q_deck_max = c1.number_input("Carga máx. por sección de taladro (kg)", 20.0, 500.0, 150.0, 10.0)
-            po.k_T = c2.number_input("Factor de retacado", 0.5, 2.0, 1.0, 0.1)
-            po.alpha = c1.number_input("Desviación (m/m)", 0.0, 0.05, 0.01, 0.005)
-            po.e_coll = c2.number_input("Error de emboquille (m)", 0.0, 0.3, 0.05, 0.01)
-            po.staggered = st.checkbox("Malla al tresbolillo", True)
-            pexp = explosive_picker("Explosivo", "ANFO (granel)" if po.D_mm >= 51 else "Emulnor 1000",
-                                    '1 1/4" x 12"', f"pe{PROD_METHODS.index(method)}")
-        key = f"Producción|{method}"
-        ov = ss.overrides.get(key, (None, None))
-        po.B_override = ov[0]
-        if ov[1]:
-            po.SB = ov[1]
-        res = run_produccion(rock, pexp, po, cost)
-        main_exp = pexp
-        used_exps = [pexp]
-        pdf_params = [("Método", method), ("Criterio de burden", criterion), ("Ø perforación", f"{po.D_mm:.0f} mm"),
-                      ("Geometría (largo · ancho · alto)", f"{po.length:.1f} · {po.width:.1f} · {po.height:.1f} m"),
-                      ("Explosivo", pexp.label()), ("Filas por voladura", po.rows_blast),
-                      ("Desviación · emboquille", f"{po.alpha * 100:.1f} % · {po.e_coll:.2f} m")]
+                fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
+                po.f = c1.number_input("Factor de fijación f", 0.8, 1.6, fdef, 0.05,
+                                       help="Langefors: vertical 1.0; 3:1 0.9; 2:1 0.85. Holmberg: arriba/horizontal 1.45; abajo 1.20")
+                if method != PROD_METHODS[2]:
+                    po.SB = c2.number_input("S/B", 1.0, 2.0, 1.25, 0.05)
+                po.rows_blast = c1.number_input("Filas por voladura", 1, 50, 3)
+                po.col_ratio = c2.number_input("Columna / fondo", 0.3, 1.0, 0.5 if method != PROD_METHODS[2] else 0.6, 0.05)
+                po.q_deck_max = c1.number_input("Carga máx. por sección de taladro (kg)", 20.0, 500.0, 150.0, 10.0)
+                po.k_T = c2.number_input("Factor de retacado", 0.5, 2.0, 1.0, 0.1)
+                po.alpha = c1.number_input("Desviación (m/m)", 0.0, 0.05, 0.01, 0.005)
+                po.e_coll = c2.number_input("Error de emboquille (m)", 0.0, 0.3, 0.05, 0.01)
+                po.staggered = st.checkbox("Malla al tresbolillo", True)
+                pexp = explosive_picker("Explosivo", "ANFO (granel)" if po.D_mm >= 51 else "Emulnor 1000",
+                                        '1 1/4" x 12"', f"pe{PROD_METHODS.index(method)}")
+            key = f"Producción|{method}"
+            ov = ss.overrides.get(key, (None, None))
+            po.B_override = ov[0]
+            if ov[1]:
+                po.SB = ov[1]
+            res = run_produccion(rock, pexp, po, cost)
+            main_exp = pexp
+            used_exps = [pexp]
+            pdf_params = [("Método", method), ("Criterio de burden", criterion), ("Ø perforación", f"{po.D_mm:.0f} mm"),
+                          ("Geometría (largo · ancho · alto)", f"{po.length:.1f} · {po.width:.1f} · {po.height:.1f} m"),
+                          ("Explosivo", pexp.label()), ("Filas por voladura", po.rows_blast),
+                          ("Desviación · emboquille", f"{po.alpha * 100:.1f} % · {po.e_coll:.2f} m")]
 except Exception as e:  # noqa: BLE001
     err = e
 
