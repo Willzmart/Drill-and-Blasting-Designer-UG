@@ -108,6 +108,22 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Chimenea slot integrada, giro del carrusel y carguío de taladros largos
+- **Chimenea slot en cada método de taladros largos** (LBH, vetas angostas, abanicos/subniveles; opcional en VCR, que
+  usa el corte inferior como cara libre): expander *Chimenea slot (cara libre inicial)*. La chimenea se diseña con el
+  cuele Konya o LJ, se ensancha de caja a caja (cámara slot) y la primera fila/anillo de producción sale hacia ella
+  (x = 0) con el burden y espaciamiento de producción. Se dibuja en planta, en 3D y en el PDF; su explosivo y metraje
+  se reportan aparte y no entran en la carga por voladura de producción. En la secuencia sale primero.
+- **Taladros paralelos inclinados**: inclinación 45–90° y sentido (±y) para LBH y vetas; perforación **pasante**
+  (conecta las dos labores, tapón de fondo 0.3 m) o **ciega** (puente de roca configurable). La sección del tajeo
+  se dibuja como paralelogramo y la chimenea slot toma la misma inclinación.
+- **Carrusel que gira en dip**: el rectángulo del carrusel se gira con el eje de cada taladro (paralelos y
+  abanicos) y se verifica que no choque con paredes ni techo de la labor; los taladros con choque se reportan.
+  En abanicos se puede inclinar el plano del anillo (dip 60–90°).
+- **Carga en toda la longitud**: en taladros largos la columna es continua desde el taco de boca hasta el fondo
+  (con el iniciador en el fondo); el límite de carga es la longitud total del taladro. Las cargas espaciadas
+  quedan como opción. El VCR mantiene cargas esféricas (L ≤ 6D).
+
 ### Pestaña Energía (después de la Vista 3D)
 
 - **Energía por taladro:** Q·e (MJ), energía lineal (MJ/m), MJ/t y kg/t del volumen de influencia. Incluye gráfico de barras por zona.

@@ -11,7 +11,9 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import LineString, Point, Polygon
 
-from .drilling import DrillSetup, carousel, collar_from_pivot, drift_centers, drift_polygon, rig_fits
+from shapely import affinity
+from .drilling import DrillSetup, carousel, collar_from_pivot, drift_centers, drift_polygon, feed_angle, rig_fits
+from .slot import SlotOptions, place_slot, run_slot
 from .common import (KONYA_EQS, Explosive, Result, Rock, ash_burden, b_pearse_kv, bmax_holmberg, bmax_langefors,
                      colors_for, finalize_holes, konya_burden, konya_spacing, new_hole, pearse_course_burden,
                      ring_stemming, rustan_burden, summary_common, torbica_burden)
@@ -84,7 +86,9 @@ class ProdOptions:
     e_coll: float = 0.05       # error de emboquille (m)
     k_T: float = 1.0           # factor del retacado
     col_ratio: float = 0.5     # carga de columna / fondo
-    q_deck_max: float = 150.0  # kg por carga (LBH)
+    q_deck_max: float = 150.0  # kg por carga (solo si se usan cargas espaciadas)
+    full_column: bool = True   # taladros largos: carga continua en toda la longitud (menos taco e iniciador)
+    primer_len: float = 0.15   # longitud del iniciador (booster + detonador) en el fondo de la columna (m)
     staggered: bool = True
     fan_type: str = "Ascendente"
     drift_w: float = 4.0
@@ -113,6 +117,12 @@ class ProdOptions:
     fan_stem: str = FAN_STEMMING[0]
     drill: DrillSetup | None = None   # labor de perforación, pivote y carrusel (taladros largos)
     Lmax_ft: float = 102.0        # capacidad de perforación del equipo de taladros largos (Simba)
+    dip_side: float = 1.0         # taladros paralelos inclinados: +1 hacia −y, −1 hacia +y
+    breakthrough: bool = True     # taladros paralelos: pasantes (conectan las dos labores) o ciegos
+    toe_gap: float = 1.0          # ciegos: distancia del fondo a la labor inferior (m)
+    ring_dip: float = 90.0        # abanicos: inclinación del plano del anillo (90 = vertical)
+    slot_on: bool = True          # chimenea slot como cara libre inicial
+    slot: SlotOptions | None = None
     rod_ft: float = 5.0           # longitud de barra
 
 
@@ -250,7 +260,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         Lch = s_bot - s_top
         if Lch <= 0.1:
             return [], tacos, T, 0.0
-        if decks:
+        if decks and not o.full_column:
             Qh = q * Lch
             nd = max(1, math.ceil(Qh / o.q_deck_max))
             ti = (14 if ex.name.startswith("ANFO") else 17) * D
@@ -265,6 +275,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                     tacos.append((s + ld, s + ld + ti))
                 s += ld + ti
             return cargas, tacos, T, Lch
+        if decks and o.full_column:
+            return [(s_top, s_bot, q)], tacos, T, Lch
         if bottom:
             lf = min(1.3 * B, 0.5 * Lch)
             return [(s_top, s_bot - lf, o.col_ratio * q), (s_bot - lf, s_bot, q)], tacos, T, Lch
@@ -273,7 +285,11 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     if m in (PROD_METHODS[0], PROD_METHODS[1]):
         H = o.height
         dip = math.radians(o.dip_deg)
-        L = H / math.sin(dip)
+        Hd = H - (0.0 if o.breakthrough else o.toe_gap)
+        L = Hd / math.sin(dip)
+        lg.add(fase, "Inclinación de los taladros", "β", o.dip_deg, "°", "90° = verticales")
+        lg.add(fase, "Tipo de perforación", "—", "pasante (conecta las dos labores)" if o.breakthrough else
+               f"ciega (puente de {o.toe_gap:.2f} m sobre la labor inferior)", "", "")
         Bm, B = _burden(o, rock, ex, L, q, o.f, lg, fase)
         B = min(B, o.B_override) if o.B_override else B
         if o.B_override and o.B_override > Bm:
@@ -284,7 +300,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         nrow_y = max(1, math.ceil(o.width / S)) if m == PROD_METHODS[1] else max(1, round(o.width / S))
         ys = np.linspace(-o.width / 2 + o.width / (2 * nrow_y), o.width / 2 - o.width / (2 * nrow_y), nrow_y)
         nx = max(1, int((o.length - 0.5 * B) / B))
-        u = (0.0, -math.cos(dip), -math.sin(dip))
+        u = (0.0, -o.dip_side * math.cos(dip), -math.sin(dip))
         for i in range(nx):
             x = (i + 0.5) * B + 0.5 * B
             shift = (S / 2 if (o.staggered and i % 2 and nrow_y > 1) else 0.0)
@@ -292,7 +308,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                 yy = y + shift
                 if abs(yy) > o.width / 2 + 1e-6:
                     continue
-                cargas, tacos, T, Lch = charge_column(L, B, bottom=False, plug=0.3, decks=True)
+                cargas, tacos, T, Lch = charge_column(L, B, bottom=False, plug=0.3 if o.breakthrough else 0.0,
+                                                      decks=True)
                 add("Primera fila" if i == 0 else "Producción", i, x, yy, x, yy + 0.0, H, u, L, cargas, tacos, B, S)
         sources = [(0.0, y) for y in np.linspace(-o.width / 2, o.width / 2, 5)]
         outline = [(0, -o.width / 2), (o.length, -o.width / 2), (o.length, o.width / 2), (0, o.width / 2),
@@ -311,15 +328,21 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         ds = o.drill or DrillSetup(width=o.drift_w, height=o.drift_h)
         o.drift_w, o.drift_h = ds.width, ds.height
         z_lo, z_hi = (-o.down_h if o.fan_type != "Ascendente" else 0.0), (o.up_h if o.fan_type != "Descendente" else 0.0)
-        drift = drift_polygon(ds)
-        dp = (ds.pivot_y, ds.pivot_h)
-        ring = Polygon([(-AV / 2, z_lo), (AV / 2, z_lo), (AV / 2, o.drift_h + z_hi), (-AV / 2, o.drift_h + z_hi)])
+        beta = math.radians(90.0 - o.ring_dip)
+        kz = 1 / max(math.cos(beta), 0.2)          # escala vertical en el plano inclinado del anillo
+        drift = affinity.scale(drift_polygon(ds), 1.0, kz, origin=(0, 0))
+        dp = (ds.pivot_y, ds.pivot_h * kz)
+        ring = Polygon([(-AV / 2, z_lo * kz), (AV / 2, z_lo * kz), (AV / 2, (o.drift_h + z_hi) * kz),
+                        (-AV / 2, (o.drift_h + z_hi) * kz)])
         F_d = "2a. Labor de perforación y equipo"
         lg.add(F_d, "Labor de perforación", "—", f"{ds.kind.split(' (')[0]} {ds.width:.2f} × {ds.height:.2f} m", "",
                f"área {drift.area:.2f} m²")
         lg.add(F_d, "Punto de pivote del equipo", "(y, z)", f"({dp[0]:.2f}, {dp[1]:.2f})", "m",
                "altura típica 1.3–1.5 m sobre el piso")
         lg.add(F_d, "Rectángulo del carrusel", "a × h", f"{ds.car_w:.2f} × {ds.car_h:.2f}", "m", "depende del equipo")
+        if o.ring_dip < 89.9:
+            lg.add(F_d, "Inclinación del anillo (dip)", "—", f"{o.ring_dip:.0f}° respecto a la horizontal", "",
+                   "el diseño se hace en el plano del anillo; las cotas verticales se escalan por 1/cos(90° − dip)")
         if not rig_fits(drift, ds, dp):
             res.warnings.append("El carrusel del equipo no cabe en la labor de perforación con el pivote indicado: "
                                 "amplíe la sección, baje el pivote o use un equipo más compacto.")
@@ -339,18 +362,22 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             p = ring_out.interpolate(k * ring_out.length / n_t)
             if drift.buffer(0.3).contains(p):
                 continue
-            if o.fan_type == "Ascendente" and p.y < o.drift_h * 0.5:
+            if o.fan_type == "Ascendente" and p.y < o.drift_h * 0.5 * kz:
                 continue
-            if o.fan_type == "Descendente" and p.y > o.drift_h * 0.5:
+            if o.fan_type == "Descendente" and p.y > o.drift_h * 0.5 * kz:
                 continue
             toes.append((p.x, p.y))
         toes.sort(key=lambda t: math.atan2(t[1] - dp[1], t[0] - dp[0]))
         angs = [math.atan2(ty - dp[1], tx - dp[0]) for tx, ty in toes]
         nr = max(1, int(o.length / B))
         Ls = []
-        feed2d, dead = [], []
+        feed2d, dead, coll, angs_c = [], [], [], []
         for j, (tx, ty) in enumerate(toes):
             (cy, cz), dpc = collar_from_pivot(drift, dp, (tx, ty))
+            a_c = feed_angle(tx - dp[0], ty - dp[1])
+            angs_c.append(a_c)
+            if not rig_fits(drift, ds, dp, a_c):
+                coll.append(j)
             dead.append(dpc)
             L = math.hypot(tx - cy, ty - cz)
             if L > 25:
@@ -366,7 +393,10 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                 if j % 2:  # alternar retacado largo/corto
                     s0 = min(0.75 * L, s0 * 1.35)
             lb = L / 5
-            cargas = [(s0, max(s0, L - lb), o.col_ratio * q), (max(s0, L - lb), L, q)]
+            if o.full_column:
+                cargas = [(s0, L, q)]
+            else:
+                cargas = [(s0, max(s0, L - lb), o.col_ratio * q), (max(s0, L - lb), L, q)]
             Ls.append((L, L - s0, sum((b - a) * qq for a, b, qq in cargas)))
             ux, uz = (tx - cy) / L, (ty - cz) / L
             for i in range(nr):
@@ -376,8 +406,9 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                     feed2d.append(([dp[0], cy], [dp[1], cz]))
                 add("Primera fila" if i == 0 else "Producción", i, tx if i == 0 else tx, ty, X0, cy, cz,
                     (uz * 0 + 0.0, ux, uz), L, cargas, [(0.0, s0)], B, S_toe)
-                rows[-1]["X0"], rows[-1]["Y0"], rows[-1]["Z0"] = X0, cy, cz
-                rows[-1]["ux"], rows[-1]["uy"], rows[-1]["uz"] = 0.0, ux, uz
+                # del plano del anillo (y, z') al espacio: el anillo se inclina 'beta' hacia +X
+                rows[-1]["X0"], rows[-1]["Y0"], rows[-1]["Z0"] = X0 + cz * math.sin(beta), cy, cz * math.cos(beta)
+                rows[-1]["ux"], rows[-1]["uy"], rows[-1]["uz"] = uz * math.sin(beta), ux, uz * math.cos(beta)
                 rows[-1]["x"], rows[-1]["y"] = tx + (0.0 if i == 0 else 0.0), ty
         # 2D: vista de la sección (anillo); sólo el primer anillo se dibuja en 2D
         P["fan_rows"] = nr
@@ -388,14 +419,26 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         if dead:
             lg.add(F_d, "Distancia pivote–boca (media / máx.)", "—", f"{np.mean(dead):.2f} / {max(dead):.2f}", "m",
                    "las bocas están donde la recta pivote–fondo corta el contorno de la labor")
-        P["drill2d"] = dict(drift=list(drift.exterior.coords), pivots=[dp], carousels=[list(carousel(ds, dp).exterior.coords)],
-                            feed=feed2d)
+        cars = [list(carousel(ds, dp).exterior.coords)]
+        if angs_c:
+            for k in sorted({int(np.argmin(angs_c)), int(np.argmax(angs_c))} | set(coll[:3])):
+                cars.append(list(carousel(ds, dp, angs_c[k]).exterior.coords))
+        lg.add(F_d, "Giro del carrusel (mín. / máx.)", "θ", f"{math.degrees(min(angs_c or [0])):.0f}° / "
+               f"{math.degrees(max(angs_c or [0])):.0f}°", "", "respecto a la vertical; el carrusel gira con cada taladro")
+        lg.add(F_d, "Taladros con choque del carrusel", "—", len(coll), "", "rectángulo girado fuera de la labor")
+        if coll:
+            res.warnings.append(f"El carrusel choca con las paredes o el techo de la labor al girar para {len(coll)} "
+                                f"taladro(s) del anillo (los más tendidos): baje el pivote, reduzca el carrusel o amplíe la "
+                                f"labor de perforación.")
+        P["drill2d"] = dict(drift=list(drift.exterior.coords), pivots=[dp], carousels=cars, feed=feed2d)
         xlabel, ylabel = "Ancho del tajeo y (m)", "Altura z (m)"
         ring_area = ring.area - drift.area
         vol = min(o.rows_blast, nr) * B * ring_area
         sources = [(t[0], t[1]) for t in toes]
         scene.update(box=(0, o.length, -AV / 2, AV / 2, z_lo, o.drift_h + z_hi),
-                     drifts3d=[(list(drift.exterior.coords), 0.0, o.length)])
+                     drifts3d=[(list(drift_polygon(ds).exterior.coords), 0.0, o.length)])
+        if o.ring_dip < 89.9:
+            xlabel, ylabel = "Ancho del tajeo y (m)", "Distancia en el plano del anillo z' (m)"
         Lm = np.mean([a for a, _, _ in Ls]) if Ls else 10
         Lcm = np.mean([b for _, b, _ in Ls]) if Ls else 8
         Qm = np.mean([c for _, _, c in Ls]) if Ls else 10
@@ -413,6 +456,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         X = 4 / 3 * Do
         S = o.B_override if o.B_override else o.k_vcr * Do
         T = 12 * D
+        lg.add(fase, "Criterio de carguío", "—", "carga esférica (no columna completa)", "",
+               "a diferencia de los taladros largos, el VCR carga solo L ≤ 6D por cráter")
         for lab, sym, v, un, eq in [("Carga esférica (L = 6D)", "Q", Qs, "kg", "3πD³ρe/2"),
                                     ("Profundidad crítica", "D_c", Dc, "m", "E_t·Q^(1/3)"),
                                     ("Profundidad óptima", "D_o", Do, "m", "Δ_o·D_c"),
@@ -537,8 +582,28 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             scene.update(box=(0, L, -W / 2, W / 2, 0, Hf), front=True)
             xlabel, ylabel = "Ancho y (m)", "Altura z (m)"
             frag = dict(B=B, S=S, q=q, Lc=L - o.k_T * max(10 * D, min(0.7 * B, 25 * D)), H=L, limit=Bm)
+    slot_rel = None
+    if o.slot_on and m in PROD_METHODS[:4] and rows:
+        slot_rel, order = _add_slot(res, rock, ex, o, rows, order, scene, lg, outline, lines2d)
     res.holes = finalize_holes(rows, order)
     Lmax = float(res.holes.L.max()) if len(res.holes) else 0.0
+    if m in PROD_METHODS[:3] and len(res.holes):
+        hp = res.holes[res.holes.grupo >= 0]
+        Fq = "2b. Carga de los taladros largos"
+        if o.full_column:
+            Lc = hp.cargas.map(lambda c: sum(b - a for a, b, _ in c))
+            lg.add(Fq, "Criterio de carguío", "—", "columna continua en toda la longitud", "",
+                   "límite de carga = L − taco de boca" + (" − tapón de fondo" if m != PROD_METHODS[2] and
+                                                            o.breakthrough else "") + "; iniciador en el fondo")
+            lg.add(Fq, "Longitud cargada media / máx.", "L_c", f"{Lc.mean():.2f} / {Lc.max():.2f}", "m",
+                   f"{100 * Lc.sum() / hp.L.sum():.0f} % de la longitud perforada")
+            lg.add(Fq, "Iniciador (booster + detonador)", "l_i", o.primer_len, "m",
+                   "ubicado en el fondo del taladro, dentro de la columna")
+            lg.add(Fq, "Carga máxima por taladro", "Q_max", float(hp.kg.max()), "kg",
+                   f"q = {q:.2f} kg/m × L_c (sin seccionar)")
+        else:
+            lg.add(Fq, "Criterio de carguío", "—", "cargas espaciadas / fondo + columna", "",
+                   f"carga máx. por sección {o.q_deck_max:.0f} kg")
     if Lmax > 0:
         lg.add("2b. Control de desviación", "Desviación al fondo del taladro más largo", "α·L", o.alpha * Lmax, "m",
                f"α = {o.alpha * 100:.1f} %, L = {Lmax:.1f} m")
@@ -560,10 +625,13 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     if m == PROD_METHODS[2]:
         lg.add("2c. Tiempos (Onederra y Chitombo 2007)", "Retardo entre taladros de un anillo", "Δt",
                "3–15 ms/m de burden; cooperación óptima 5–25 ms", "", "")
-    res.relief = pd.DataFrame(columns=["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"])
+    res.relief = slot_rel if slot_rel is not None else \
+        pd.DataFrame(columns=["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"])
     res.zone_order = [z for z in order if z in set(res.holes.zona)]
     res.zone_colors = colors_for(order)
     res.sources = sources
+    if slot_rel is not None and len(slot_rel) and m != PROD_METHODS[2]:
+        res.sources = [(r.x, r.y) for r in slot_rel.itertuples()]
     res.view2d = dict(kind="plan" if outline and m not in (PROD_METHODS[2], PROD_METHODS[5], PROD_METHODS[7]) else "front",
                       outline=outline, openings=[], lines=lines2d, xlabel=xlabel, ylabel=ylabel)
     res.scene3d = scene
@@ -586,11 +654,83 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     res.summary["Explosivo total (kg)"] = kg_blast
     res.summary["Factor de carga (kg/m³)"] = kg_blast / vol if vol else np.nan
     res.summary["Factor de carga (g/t)"] = ce_gt
-    res.summary["Explosivo de toda la malla dibujada (kg)"] = float(res.holes.kg.sum())
+    res.summary["Explosivo de toda la malla dibujada (kg)"] = float(res.holes[res.holes.grupo >= 0].kg.sum())
+    if res.p.get("slot"):
+        sl = res.p["slot"]
+        res.summary["Chimenea slot: explosivo (kg)"] = sl["kg"]
+        res.summary["Chimenea slot: taladros cargados"] = sl["n"]
+        res.summary["Chimenea slot: perforación (m)"] = sl["drill"]
     res.frag = dict(B=frag["B"], S=frag["S"], q=frag["q"], Lc=max(frag["Lc"], 0.2), H=frag["H"], d_mm=o.D_mm,
                     W=o.e_coll + o.alpha * frag["H"], rws=ex.rws * 100, modo="optimizar", B_limit=frag["limit"],
                     K_override=frag.get("K_override"), zona="producción")
     return res
+
+
+SLOT_ZONES = ["Slot: arranque", "Slot: cuadrante 1", "Slot: cuadrante 2", "Slot: cuadrante 3", "Slot: franqueo",
+              "Slot: destroza", "Slot: contorno", "Slot: ensanche"]
+
+
+def _add_slot(res, rock, ex, o: ProdOptions, rows, order, scene, lg, outline, lines2d):
+    """Chimenea slot (cara libre inicial) en el extremo del tajeo, con ensanche de caja a caja; las filas o
+    anillos de producción salen hacia ella con su propio burden y espaciamiento."""
+    m = o.method
+    so = o.slot or SlotOptions(widen=True)
+    W = o.width
+    if m == PROD_METHODS[2]:
+        z_lo = -o.down_h if o.fan_type != "Ascendente" else 0.0
+        z_top = o.drift_h + (o.up_h if o.fan_type != "Descendente" else 0.0)
+        H, base, dip, side = z_top - z_lo, z_lo, 90.0, 1.0
+    else:
+        H, base = o.height, 0.0
+        dip = o.dip_deg if m in (PROD_METHODS[0], PROD_METHODS[1]) else 90.0
+        side = o.dip_side
+    from dataclasses import replace as _rep
+    a_t = min(so.a, W)                          # dimensión transversal de la chimenea: no más que el tajeo
+    widen = so.widen and W > a_t + 0.5
+    so2 = _rep(so, a=a_t, kind=so.kind if a_t == so.a else "Rectangular", L=H, widen=widen, slot_len=W,
+               Lmax_ft=o.Lmax_ft, rod_ft=o.rod_ft)
+    sr = run_slot(rock, ex, so2)
+    thick = so2.slot_w if widen else so2.b
+    xc = -thick / 2
+    down = so2.direction.startswith("Desc")
+    hs, rl = place_slot(sr, xc, 0.0, dip, side, down, H)
+    hs["Z0"] = hs["Z0"] + base
+    rl["Z0"] = rl["Z0"] + base
+    zmap = {"Arranque": SLOT_ZONES[0], "Cuadrante 1": SLOT_ZONES[1], "Cuadrante 2": SLOT_ZONES[2],
+            "Cuadrante 3": SLOT_ZONES[3], "Franqueo": SLOT_ZONES[4], "Destroza": SLOT_ZONES[5],
+            "Contorno": SLOT_ZONES[6], "Cámara slot": SLOT_ZONES[7]}
+    for r in hs.drop(columns=["id"]).to_dict("records"):
+        r["zona"] = zmap.get(r["zona"], "Slot: " + r["zona"].lower())
+        r["grupo"] = int(r["grupo"]) - 20
+        if m == PROD_METHODS[2]:              # vista frontal del anillo: (y, z) a media altura
+            r["x"], r["y"] = r["Y0"], base + H / 2
+        rows.append(r)
+    if m == PROD_METHODS[2]:
+        rl["x"], rl["y"] = rl["Y0"], base + H / 2
+    F = "0. Chimenea slot (cara libre inicial)"
+    lg.add(F, "Chimenea slot", "a × b × H", f"{so2.a:.2f} × {so2.b:.2f} × {H:.1f}", "m",
+           f"en x = {xc:.2f} m; {'ensanchada de caja a caja' if widen else 'sin ensanche'}")
+    if widen:
+        lg.add(F, "Cámara slot (ensanche)", "—", f"{W:.1f} × {thick:.1f} m", "", "de caja a caja, previa a la producción")
+    lg.add(F, "Cuele y voladura", "—", f"{so2.cut.split(' (')[0]} · {so2.blast}", "", "")
+    lg.add(F, "Perforación", "—", f"{so2.direction} · {'ciega' if so2.blind else 'pasante'}", "",
+           f"Ø {so2.D1_mm:.1f} mm cargados, {so2.NB} vacíos de {so2.D2_mm:.1f} mm")
+    lg.add(F, "Taladros cargados / vacíos", "N", f"{len(hs)} / {len(rl)}", "", "")
+    lg.add(F, "Explosivo de la chimenea slot", "Q", float(hs.kg.sum()), "kg", "voladura previa, aparte de la producción")
+    lg.add(F, "Primera fila de producción", "—", "hacia la cara libre del slot (x = 0)", "",
+           "el burden y el espaciamiento de producción se miden desde el slot")
+    for w in sr.warnings:
+        res.warnings.append("Chimenea slot: " + w)
+    res.p["slot"] = dict(kg=float(hs.kg.sum()), n=len(hs), n_rel=len(rl), drill=float(hs.L.sum() + rl.L.sum()),
+                         thick=thick, widen=widen, H=H)
+    x0, x1 = -thick, 0.0
+    scene["slot_box"] = (x0, x1, -W / 2 if widen else -so2.a / 2, W / 2 if widen else so2.a / 2, base, base + H)
+    if m != PROD_METHODS[2]:
+        lines2d.append(([x0, x1, x1, x0, x0], [-W / 2, -W / 2, W / 2, W / 2, -W / 2] if widen else
+                        [-so2.a / 2, -so2.a / 2, so2.a / 2, so2.a / 2, -so2.a / 2]))
+    res.p["slot_plan"] = dict(holes=hs[["X0", "Y0", "zona"]].assign(zona=hs.zona.map(lambda z: zmap.get(z, z))),
+                              relief=rl[["X0", "Y0", "d_mm"]], box=(x0, x1, -W / 2, W / 2), width=W)
+    return rl[["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"]].reset_index(drop=True), SLOT_ZONES + order
 
 
 def _parallel_drilling(res, o: ProdOptions, scene, lg):
@@ -618,17 +758,22 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
     reach = []
     piv = []
     for _, r in h.iterrows():
+        if r.grupo < 0:          # chimenea slot: se perfora aparte
+            reach.append(True)
+            piv.append((r.Y0, r.Z0))
+            continue
         k = int(np.argmin([abs(r.Y0 - c) for c in centers]))
         uz = r.uz if abs(r.uz) > 1e-6 else -1e-6
         t = ds.pivot_h / (-uz) if uz < 0 else ds.pivot_h
         py, pz = r.Y0 - r.uy * t, r.Z0 - r.uz * t if uz < 0 else r.Z0 + ds.pivot_h
-        ok = rig_fits(drifts[k], ds, (py, pz)) and abs(r.Y0 - centers[k]) <= sec.floor_width / 2 + 1e-6
+        ok = rig_fits(drifts[k], ds, (py, pz), feed_angle(r.uy, r.uz)) and \
+            abs(r.Y0 - centers[k]) <= sec.floor_width / 2 + 1e-6
         reach.append(ok)
         piv.append((py, pz))
     h["alcance"] = reach
     res.holes = h
     n_bad = int((~h.alcance).sum())
-    first = h[h.grupo == h.grupo.min()]
+    first = h[h.grupo == h[h.grupo >= 0].grupo.min()]
     if n_bad:
         res.warnings.append(f"{n_bad} taladro(s) quedan fuera del alcance del equipo: el carrusel no cabe en la labor "
                             f"al alinear el pivote con el eje del taladro. Agregue labores de perforación, ensánchelas, "
@@ -637,8 +782,8 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
     if o.width > len(centers) * sec.floor_width + 1e-6:
         lg.add(F_d, "Ancho cubierto por las labores", "—", f"{len(centers) * sec.floor_width:.1f} de {o.width:.1f} m", "", "")
     # vista en sección (primera fila) y planta
-    dip = math.radians(o.dip_deg) if res.metodo == PROD_METHODS[1] else math.pi / 2
-    sh = H / math.tan(dip) if dip < math.pi / 2 - 1e-6 else 0.0
+    dip = math.radians(o.dip_deg) if res.metodo in (PROD_METHODS[0], PROD_METHODS[1]) else math.pi / 2
+    sh = o.dip_side * H / math.tan(dip) if dip < math.pi / 2 - 1e-6 else 0.0
     stope = [(-W / 2, H), (W / 2, H), (W / 2 - sh, 0.0), (-W / 2 - sh, 0.0), (-W / 2, H)]
     holes2d, ch2d, pv2d, car2d = [], [], [], []
     for (_, r), (py, pz) in zip(h.iterrows(), piv):
@@ -651,8 +796,10 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
         pv2d.append((py, pz, bool(r.alcance)))
     if pv2d:
         ys = [p[0] for p in pv2d]
+        rr = first.iloc[0]
+        ang = feed_angle(rr.uy, rr.uz)
         for k in (int(np.argmin(ys)), int(np.argmax(ys))):
-            car2d.append(list(carousel(ds, pv2d[k][:2]).exterior.coords))
+            car2d.append(list(carousel(ds, pv2d[k][:2], ang).exterior.coords))
     res.p["section_view"] = dict(stope=stope, drifts=[list(d.exterior.coords) for d in drifts], holes=holes2d,
                                  charges=ch2d, pivots=pv2d, carousels=car2d, H=H)
     for c in centers:
@@ -669,7 +816,7 @@ def _kg_per_blast(res, o):
     if h.empty:
         return 0.0
     if res.metodo == PROD_METHODS[3]:
-        return float(h.kg.sum())
+        return float(h[h.grupo >= 0].kg.sum())
     if res.metodo in (PROD_METHODS[5], PROD_METHODS[7]) or (res.metodo == PROD_METHODS[8] and o.orient_h):
-        return float(h.kg.sum())
-    return float(h[h.grupo < o.rows_blast].kg.sum())
+        return float(h[h.grupo >= 0].kg.sum())
+    return float(h[(h.grupo >= 0) & (h.grupo < o.rows_blast)].kg.sum())

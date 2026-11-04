@@ -44,15 +44,28 @@ def drift_polygon(ds: DrillSetup, dy=0.0, dz=0.0) -> Polygon:
     return affinity.translate(ds.section().polygon, dy, dz)
 
 
-def carousel(ds: DrillSetup, pivot) -> Polygon:
+def carousel(ds: DrillSetup, pivot, angle=0.0) -> Polygon:
+    """Rectángulo del carrusel girado 'angle' (rad, respecto a la vertical) alrededor del pivote: el lado
+    'alto' (car_h) queda alineado con el eje del taladro y car_dz desplaza el centro a lo largo de ese eje."""
     py, pz = pivot
-    zc = pz + ds.car_dz
-    return Polygon([(py - ds.car_w / 2, zc - ds.car_h / 2), (py + ds.car_w / 2, zc - ds.car_h / 2),
-                    (py + ds.car_w / 2, zc + ds.car_h / 2), (py - ds.car_w / 2, zc + ds.car_h / 2)])
+    rect = Polygon([(-ds.car_w / 2, ds.car_dz - ds.car_h / 2), (ds.car_w / 2, ds.car_dz - ds.car_h / 2),
+                    (ds.car_w / 2, ds.car_dz + ds.car_h / 2), (-ds.car_w / 2, ds.car_dz + ds.car_h / 2)])
+    rect = affinity.rotate(rect, -angle, origin=(0, 0), use_radians=True)
+    return affinity.translate(rect, py, pz)
 
 
-def rig_fits(drift: Polygon, ds: DrillSetup, pivot) -> bool:
-    return drift.buffer(1e-6).contains(carousel(ds, pivot)) and drift.contains(Point(pivot))
+def feed_angle(dy, dz):
+    """Ángulo del eje del taladro respecto a la vertical (rad), en (−π/2, π/2]: el carrusel es simétrico."""
+    a = math.atan2(dy, dz)
+    if a > math.pi / 2:
+        a -= math.pi
+    elif a <= -math.pi / 2:
+        a += math.pi
+    return a
+
+
+def rig_fits(drift: Polygon, ds: DrillSetup, pivot, angle=0.0) -> bool:
+    return drift.buffer(1e-6).contains(carousel(ds, pivot, angle)) and drift.contains(Point(pivot))
 
 
 def collar_from_pivot(drift: Polygon, pivot, toe):

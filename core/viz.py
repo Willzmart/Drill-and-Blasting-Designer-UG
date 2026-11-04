@@ -38,7 +38,7 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
             fig.add_trace(go.Scatter(x=x, y=y, mode="lines", line=dict(color=res.zone_colors.get(name, "#999"),
                                      width=1, dash="dot"), showlegend=False, hoverinfo="skip"))
     rel = res.relief
-    if rel is not None and len(rel):
+    if rel is not None and len(rel) and not res.p.get("view_filter"):
         for _, r in rel.iterrows():
             rr = r.d_mm / 2000
             fig.add_shape(type="circle", x0=r.x - rr, x1=r.x + rr, y0=r.y - rr, y1=r.y + rr,
@@ -114,6 +114,44 @@ def _drill_overlay(fig, d):
         fig.add_trace(go.Scatter(x=[p[0] for p in pv], y=[p[1] for p in pv], mode="markers", name="Pivote",
                                  marker=dict(size=10, symbol="x", color="#e377c2", line=dict(width=1, color="#7a0f5a")),
                                  hovertemplate="Pivote (%{x:.2f}, %{y:.2f})<extra></extra>"))
+
+
+def slot_plan(res, height=520):
+    """Planta de la chimenea slot y su ensanche (cara libre inicial) con las primeras filas de producción."""
+    sp = res.p.get("slot_plan")
+    if not sp:
+        return None
+    fig = go.Figure()
+    x0, x1, y0, y1 = sp["box"]
+    h = res.holes
+    prod = h[(h.grupo >= 0) & (h.grupo <= 1)]
+    fig.add_trace(go.Scatter(x=[x0, x1, x1, x0, x0], y=[y0, y0, y1, y1, y0], mode="lines", fill="toself",
+                             fillcolor="rgba(214,39,40,0.08)", line=dict(color="#d62728", width=2),
+                             name="Cámara slot (de caja a caja)"))
+    fig.add_trace(go.Scatter(x=[x1, x1 + max(3.0, 3 * (prod.X0.max() - x1) if len(prod) else 3)],
+                             y=[y0, y0], mode="lines", line=dict(color="#333", width=1.5), showlegend=False))
+    fig.add_trace(go.Scatter(x=[x1, x1 + max(3.0, 3 * (prod.X0.max() - x1) if len(prod) else 3)],
+                             y=[y1, y1], mode="lines", line=dict(color="#333", width=1.5), name="Cajas del tajeo"))
+    sh = sp["holes"]
+    for z in dict.fromkeys(sh.zona):
+        d = sh[sh.zona == z]
+        fig.add_trace(go.Scatter(x=d.X0, y=d.Y0, mode="markers", name=z,
+                                 marker=dict(size=8, color=res.zone_colors.get(z, "#999"),
+                                             line=dict(color="#222", width=0.6))))
+    rl = sp["relief"]
+    if len(rl):
+        fig.add_trace(go.Scatter(x=rl.X0, y=rl.Y0, mode="markers", name="Vacíos (alivio)",
+                                 marker=dict(size=13, color="white", line=dict(color="#222", width=2))))
+    if len(prod):
+        top = prod.groupby("id").first()
+        fig.add_trace(go.Scatter(x=top.X0, y=top.Y0, mode="markers", name="Filas 1–2 de producción (boca)",
+                                 marker=dict(size=9, symbol="circle-open", color="#1f77b4", line=dict(width=2))))
+    fig.add_annotation(x=x1, y=y1, text="cara libre", showarrow=True, ax=40, ay=-25, font=dict(color="#d62728"))
+    fig.update_yaxes(scaleanchor="x", scaleratio=1, title="Ancho del tajeo y (m)", zeroline=False)
+    fig.update_xaxes(title="Largo del tajeo x (m)", zeroline=False)
+    fig.update_layout(height=height, plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10),
+                      title="Planta de la chimenea slot y arranque de la producción", legend=dict(x=1.02, y=1))
+    return fig
 
 
 def section_view(res, height=620):
@@ -243,7 +281,9 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
     else:
         if "box" in sc:
             fig.add_trace(_box(*sc["box"], "Bloque / tajeo"))
-            if sc.get("slot"):
+            if sc.get("slot_box"):
+                fig.add_trace(_box(*sc["slot_box"], "Chimenea / cámara slot (cara libre)", "#d62728"))
+            elif sc.get("slot"):
                 x0, x1, y0, y1, z0, z1 = sc["box"]
                 fig.add_trace(_box(x0 - 2.0, x0, y0, y1, z0, z1, "Corte lateral (cara libre)", "#d62728"))
             for kd, (dco, x0, x1) in enumerate(sc.get("drifts3d", [])):

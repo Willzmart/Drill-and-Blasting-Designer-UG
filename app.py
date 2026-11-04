@@ -345,8 +345,20 @@ try:
                 hv = c2.number_input(lab_h, 1.0, 120.0, geo[2], 0.5)
                 po.height = hv
                 po.up_h = hv
-                if method == PROD_METHODS[1]:
-                    po.dip_deg = st.slider("Buzamiento de la veta (°)", 45, 90, 90)
+                if method in (PROD_METHODS[0], PROD_METHODS[1]):
+                    lab_dip = "Buzamiento de la veta / inclinación de los taladros (°)" if method == PROD_METHODS[1] \
+                        else "Inclinación de los taladros paralelos (°)"
+                    po.dip_deg = st.slider(lab_dip, 45, 90, 90, help="90° = verticales. El carrusel del Simba gira en "
+                                           "'dip' para perforar los taladros paralelos inclinados.")
+                    if po.dip_deg < 90:
+                        po.dip_side = 1.0 if st.radio("Sentido de la inclinación", ["Hacia −y (izquierda)",
+                                                      "Hacia +y (derecha)"], horizontal=True).startswith("Hacia −") else -1.0
+                    tipo = st.radio("Perforación", ["Pasante (conecta las dos labores)", "Ciega"], horizontal=True,
+                                    help="Pasante: el taladro sale a la labor inferior. Ciega: se deja un puente de roca "
+                                         "sobre la labor inferior.")
+                    po.breakthrough = tipo.startswith("Pasante")
+                    if not po.breakthrough:
+                        po.toe_gap = st.number_input("Puente sobre la labor inferior (m)", 0.3, 5.0, 1.0, 0.1)
                 if method == PROD_METHODS[2]:
                     po.fan_type = st.radio("Abanico", ["Ascendente", "Descendente", "Ambos sentidos"], horizontal=True)
                     if po.fan_type != "Ascendente":
@@ -367,6 +379,9 @@ try:
                     po.orient_h = st.radio("Banqueo", ["Vertical (50–65 mm)", "Horizontal (32–45 mm)"]) .startswith("Horiz")
                 if method == PROD_METHODS[2]:
                     po.fan_stem = st.selectbox("Retacado de los anillos", FAN_STEMMING)
+                    po.ring_dip = st.slider("Inclinación del anillo — dip (°)", 60, 90, 90,
+                                            help="90° = anillo vertical. El carrusel gira en 'dip' e inclina el plano "
+                                                 "del abanico hacia el slot.")
             if criterion.startswith("Konya"):
                 with st.sidebar.expander("Konya: ecuación y correcciones", expanded=True):
                     po.konya_eq = st.selectbox("Ecuación del burden", KONYA_EQS)
@@ -428,6 +443,40 @@ try:
                     po.drill = DrillSetup(kind=dk if not full else "Rectangular", width=dw, height=dh, radius=dr, top_w=dtw,
                                           pivot_h=ph, pivot_y=py_, car_w=cw, car_h=chh, car_dz=cdz, n_drifts=int(nd),
                                           drift_y=dy_, full_width=full)
+            if method in PROD_METHODS[:4]:
+                with st.sidebar.expander("Chimenea slot (cara libre inicial)", expanded=False):
+                    po.slot_on = st.checkbox("Incluir chimenea slot", method != PROD_METHODS[3], key=f"so{method[:6]}",
+                                             help="En taladros largos la producción arranca hacia una chimenea slot "
+                                                  "ensanchada de caja a caja; el VCR usa el corte inferior como cara libre.")
+                    if po.slot_on:
+                        so = SlotOptions(widen=True)
+                        so.kind = st.selectbox("Sección", VERTICAL_TYPES, index=0, key="ps_kind")
+                        c1, c2 = st.columns(2)
+                        so.a = c1.number_input("Lado transversal (m)", 1.2, 6.0, 2.0, 0.1, key="ps_a")
+                        so.b = c2.number_input("Lado longitudinal (m)", 1.2, 6.0, 2.0, 0.1, key="ps_b") \
+                            if so.kind.startswith("Rect") else so.a
+                        so.direction = st.radio("Perforación del slot", SLOT_DIR, key="ps_dir")
+                        so.cut = st.selectbox("Cuele", SLOT_CUTS, key="ps_cut")
+                        so.blast = st.selectbox("Voladura del slot", SLOT_BLAST, key="ps_bl")
+                        c1, c2 = st.columns(2)
+                        so.D1_mm = c1.number_input("Ø cargados (mm)", 45.0, 115.0, 63.5, 0.5, key="ps_d1")
+                        so.D2_mm = c2.number_input("Ø vacíos (mm)", 64.0, 203.0, 101.6, 0.5, key="ps_d2")
+                        so.NB = c1.number_input("N° de vacíos", 1, 4, 2, key="ps_nb")
+                        so.booster_kg = c2.number_input("Booster (kg)", 0.0, 1.0, 0.15, 0.01, key="ps_bo")
+                        if so.blast.startswith("Por tramos"):
+                            so.tramo = c1.number_input("Altura del tramo (m)", 1.0, 8.0, 3.0, 0.5, key="ps_tr")
+                        so.blind = st.radio("Tipo", ["Pasante", "Ciega"], horizontal=True, key="ps_bd") == "Ciega"
+                        if so.blind:
+                            so.toe_gap = st.number_input("Puente (m)", 0.3, 5.0, 1.0, 0.1, key="ps_tg")
+                        so.widen = st.checkbox("Ensanchar de caja a caja (cámara slot)", True, key="ps_wd")
+                        if so.widen:
+                            so.slot_w = c1.number_input("Espesor de la cámara slot (m)", 2.0, 10.0, 4.0, 0.5, key="ps_sw")
+                            so.SB = c2.slider("S/B ensanche", 1.0, 1.2, 1.1, 0.05, key="ps_sb")
+                        so.alpha = 0.01
+                        po.slot = so
+                        st.caption("La chimenea se perfora con la misma inclinación de los taladros paralelos y su ensanche "
+                                   "abarca todo el ancho del tajeo; la primera fila de producción sale hacia ella con el "
+                                   "burden y espaciamiento de producción.")
             with st.sidebar.expander("Parámetros del esquema", expanded=False):
                 c1, c2 = st.columns(2)
                 fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
@@ -437,7 +486,13 @@ try:
                     po.SB = c2.number_input("S/B", 1.0, 2.0, 1.25, 0.05)
                 po.rows_blast = c1.number_input("Filas por voladura", 1, 50, 3)
                 po.col_ratio = c2.number_input("Columna / fondo", 0.3, 1.0, 0.5 if method != PROD_METHODS[2] else 0.6, 0.05)
-                po.q_deck_max = c1.number_input("Carga máx. por sección de taladro (kg)", 20.0, 500.0, 150.0, 10.0)
+                if method in PROD_METHODS[:3]:
+                    po.full_column = st.checkbox("Carga continua en toda la longitud del taladro", True,
+                                                 help="Taladros largos: la columna llega a todo el taladro descontando "
+                                                      "el taco de boca y el iniciador va en el fondo. Desmarque para "
+                                                      "cargas espaciadas (decks).")
+                if not po.full_column or method not in PROD_METHODS[:3]:
+                    po.q_deck_max = c1.number_input("Carga máx. por sección de taladro (kg)", 20.0, 500.0, 150.0, 10.0)
                 po.k_T = c2.number_input("Factor de retacado", 0.5, 2.0, 1.0, 0.1)
                 po.alpha = c1.number_input("Desviación (m/m)", 0.0, 0.05, 0.01, 0.005)
                 po.e_coll = c2.number_input("Error de emboquille (m)", 0.0, 0.3, 0.05, 0.01)
@@ -456,6 +511,14 @@ try:
                           ("Geometría (largo · ancho · alto)", f"{po.length:.1f} · {po.width:.1f} · {po.height:.1f} m"),
                           ("Explosivo", pexp.label()), ("Filas por voladura", po.rows_blast),
                           ("Desviación · emboquille", f"{po.alpha * 100:.1f} % · {po.e_coll:.2f} m")]
+            if method in (PROD_METHODS[0], PROD_METHODS[1]):
+                pdf_params.append(("Taladros paralelos", f"{po.dip_deg:.0f}° · " + ("pasantes" if po.breakthrough
+                                   else f"ciegos (puente {po.toe_gap:.1f} m)")))
+            if method == PROD_METHODS[2]:
+                pdf_params.append(("Inclinación del anillo", f"{po.ring_dip:.0f}°"))
+            if method in PROD_METHODS[:4]:
+                pdf_params.append(("Chimenea slot", "sí — " + (po.slot.direction if po.slot else "")
+                                   if po.slot_on else "no (cara libre por corte inferior)"))
 except Exception as e:  # noqa: BLE001
     err = e
 
@@ -705,12 +768,15 @@ with tabs[2]:
     vec = c2.checkbox("Vectores de salida (con secuencia)", False)
     opn = c3.checkbox("Aberturas del cuele", True)
     st.plotly_chart(viz.view_2d(res, label, ss.seq, vec and ss.seq is not None, opn), width="stretch")
+    fsl = viz.slot_plan(res)
+    if fsl is not None:
+        st.plotly_chart(fsl, width="stretch")
     fsv = viz.section_view(res)
     if fsv is not None:
         st.plotly_chart(fsv, width="stretch")
         st.caption("Cada taladro paralelo se perfora con el pivote sobre la prolongación de su eje, a la altura del "
-                   "pivote sobre el piso de la labor; si el rectángulo del carrusel no cabe en la labor, el taladro "
-                   "queda fuera del alcance (rojo).")
+                   "pivote sobre el piso de la labor; el carrusel gira con el 'dip' del taladro y, si el rectángulo "
+                   "girado no cabe en la labor (choca con paredes o techo), el taladro queda fuera del alcance (rojo).")
 
 with tabs[3]:
     c1, c2, c3, c4 = st.columns(4)

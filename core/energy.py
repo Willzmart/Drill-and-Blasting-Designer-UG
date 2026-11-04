@@ -32,9 +32,11 @@ AX = "XYZ"
 def blast_holes(res, scope="voladura"):
     """Taladros de una voladura (producción: filas o anillos por voladura) o toda la malla."""
     h = res.holes
-    if scope != "voladura" or res.labor != "Producción" or res.p.get("blast_all"):
+    if scope != "voladura" or res.labor != "Producción":
         return h
-    return h[h.grupo < res.p.get("rows_blast", 10 ** 6)]
+    if res.p.get("blast_all"):
+        return h if res.metodo.startswith("Chimenea slot") else h[h.grupo >= 0]
+    return h[(h.grupo >= 0) & (h.grupo < res.p.get("rows_blast", 10 ** 6))]
 
 
 def segments(res, emap: dict, e_default: float, holes=None):

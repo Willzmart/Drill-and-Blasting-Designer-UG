@@ -59,6 +59,8 @@ class SlotOptions:
     Lmax_ft: float = 102.0          # capacidad de perforación del equipo
     rod_ft: float = 5.0             # longitud de barra
     alpha: float = 0.01             # desviación (m/m)
+    blind: bool = False             # perforación ciega (no conecta con la otra labor)
+    toe_gap: float = 1.0            # ciega: distancia del fondo del taladro a la otra labor (m)
     widen: bool = False             # ensanche a cámara slot
     slot_len: float = 8.0           # cámara slot: dimensión transversal al tajeo (m)
     slot_w: float = 4.0             # cámara slot: dimensión a lo largo del tajeo (m)
@@ -76,14 +78,18 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
     vs = build_vertical_section(o.kind, o.a, o.b)
     D1, D2 = o.D1_mm / 1000, o.D2_mm / 1000
     q = ex.q_lineal(D1)
-    L = o.L
+    Ltot = o.L
+    L = o.L - (o.toe_gap if o.blind else 0.0)
     down = o.direction.startswith("Desc")
     F0, F1, F2, F3 = ("1. Datos de la chimenea slot", "2. Cuele y distribución", "2a. Equipo y longitud de perforación",
                       "3. Carguío y voladura")
     lg.add(F0, "Sección de la chimenea", "a × b", f"{o.a:.2f} × {o.b:.2f}", "m", f"área {vs.area:.2f} m²")
-    lg.add(F0, "Longitud de perforación", "L", L, "m", "altura entre subniveles")
-    lg.add(F0, "Volumen in situ", "V", vs.area * L, "m³")
-    lg.add(F0, "Tonelaje", "T", vs.area * L * rock.rho, "t", f"ρ = {rock.rho:.2f} t/m³")
+    lg.add(F0, "Altura entre labores", "H", Ltot, "m", "")
+    lg.add(F0, "Longitud de perforación", "L", L, "m",
+           f"ciega: queda un puente de {o.toe_gap:.2f} m hasta la otra labor" if o.blind
+           else "pasante: conecta las dos labores")
+    lg.add(F0, "Volumen in situ", "V", vs.area * Ltot, "m³")
+    lg.add(F0, "Tonelaje", "T", vs.area * Ltot * rock.rho, "t", f"ρ = {rock.rho:.2f} t/m³")
     lg.add(F0, "Densidad lineal de carga", "q", q, "kg/m", ex.label())
     # equipo
     Lmax = o.Lmax_ft * FT
@@ -101,7 +107,7 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
     order = ["Arranque", "Cuadrante 1", "Cuadrante 2", "Cuadrante 3", "Franqueo", "Destroza", "Contorno",
              "Cámara slot"]
     group = {z: i for i, z in enumerate(order)}
-    Z0, u = (L, (0, 0, -1)) if down else (0.0, (0, 0, 1))
+    Z0, u = (Ltot, (0, 0, -1)) if down else (0.0, (0, 0, 1))
     # tacos y cargas según el modo de voladura (s se mide desde la boca)
     if o.blast.startswith("Por tramos"):
         def charge(Th):
@@ -240,7 +246,7 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
     res.summary["Explosivo total (kg)"] = kg
     res.summary["Factor de carga (kg/m³)"] = kg / vol if vol else np.nan
     res.summary["Factor de carga (g/t)"] = 1000 * kg / (vol * rock.rho) if vol else np.nan
-    res.summary["Índice de perforación (t/m)"] = vs.area * L * rock.rho / drill_m if drill_m else np.nan
+    res.summary["Índice de perforación (t/m)"] = vs.area * Ltot * rock.rho / drill_m if drill_m else np.nan
     res.summary["Barras por taladro"] = n_rod
     lg.add(F3, "Explosivo por voladura (incluye boosters)", "Q", kg, "kg", f"{o.booster_kg:.2f} kg de booster por carga")
     lg.add(F3, "Índice de perforación", "IP", res.summary["Índice de perforación (t/m)"], "t/m",
@@ -253,7 +259,7 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
     res.view2d = dict(kind="plan", outline=outline, openings=[("Cuele", list(opening.exterior.coords))]
                       if opening is not None else [], lines=lines, xlabel="x (m)", ylabel="y (m)",
                       dims=(o.a, o.b))
-    res.scene3d = dict(kind="vertical", outline=outline, up=not down, advance=o.tramo, length=L)
+    res.scene3d = dict(kind="vertical", outline=outline, up=not down, advance=o.tramo, length=Ltot)
     res.frag = dict(B=Bd, S=o.SB * Bd, q=q, Lc=max((o.tramo if o.blast.startswith("Por tramos") else L) - 0.5, 0.2),
                     H=o.tramo if o.blast.startswith("Por tramos") else L, d_mm=o.D1_mm, W=o.alpha * L,
                     rws=ex.rws * 100, modo="verificar", min_dim=vs.min_dim, ratio=3.0, B_limit=Bd, zona="destroza")
@@ -261,3 +267,39 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
     P["rows_blast"] = 99
     P["blast_all"] = True
     return res
+
+
+def place_slot(slot_res: Result, xc: float, yc: float, dip_deg: float = 90.0, side: float = 1.0, down=True,
+               H: float | None = None):
+    """Lleva los taladros de la chimenea slot (coordenadas locales: x transversal, y longitudinal) al sistema del
+    tajeo (X a lo largo del tajeo, Y transversal) y los inclina con el buzamiento de los taladros paralelos.
+    Devuelve (taladros, vacíos) como DataFrames."""
+    dip = math.radians(dip_deg)
+    cot = math.cos(dip) / math.sin(dip) if dip_deg < 89.99 else 0.0
+    ud = np.array([0.0, -side * math.cos(dip), -math.sin(dip)])  # dirección descendente
+
+    def tr(df):
+        df = df.copy()
+        if df.empty:
+            return df
+        xl, yl = df.x.values.copy(), df.y.values.copy()
+        X, Y = xc + yl, yc + xl
+        df["X0"], df["Y0"] = X, Y
+        df["x"], df["y"] = X, Y
+        if dip_deg < 89.99:
+            L_h = df.L.values
+            if down:
+                df["ux"], df["uy"], df["uz"] = ud[0], ud[1], ud[2]
+                df["L"] = L_h / math.sin(dip)
+            else:
+                df["ux"], df["uy"], df["uz"] = -ud[0], -ud[1], -ud[2]
+                df["L"] = L_h / math.sin(dip)
+                df["Y0"] = Y - side * (H or 0.0) * cot
+            if "cargas" in df:
+                k = 1 / math.sin(dip)
+                df["cargas"] = [[(a * k, b * k, q) for a, b, q in c] for c in df.cargas]
+                df["tacos"] = [[(a * k, b * k) for a, b in (t or [])] for t in df.tacos]
+                df["kg"] = [sum((b - a) * q for a, b, q in c) for c in df.cargas]
+        return df
+
+    return tr(slot_res.holes), tr(slot_res.relief)

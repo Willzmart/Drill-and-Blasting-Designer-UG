@@ -102,7 +102,7 @@ def design_drawing(res, title, max_label=400):
         a = np.asarray(coords)
         ax.plot(a[:, 0], a[:, 1], ls=":", lw=0.8, color=_hex(res.zone_colors.get(name, "#999999")), zorder=2)
     rel = res.relief
-    if rel is not None and len(rel):
+    if rel is not None and len(rel) and not res.p.get("view_filter"):
         for _, r in rel.iterrows():
             ax.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, 0.02), fc="white", ec="#111111", lw=1.0, zorder=4))
         pts.append(rel[["x", "y"]].to_numpy())

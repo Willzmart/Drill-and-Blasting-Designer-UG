@@ -167,7 +167,8 @@ def schedule_milp(h, parent, opt, P, time_limit=20):
 
 def schedule_rows(h):
     """Producción por filas: un número por fila; dentro de la fila se escalona 10 ms (Du Pont)."""
-    period = h.grupo.values.astype(int) + 1
+    g = h.grupo.values.astype(int)
+    period = np.searchsorted(np.unique(g), g) + 1        # rango denso: el slot (grupos negativos) sale primero
     return period
 
 
