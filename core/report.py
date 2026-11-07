@@ -421,9 +421,85 @@ def _mesh_edges(res, h, center, plan):
     return P, E, C
 
 
+def _hseg(ax, a, b, y, off, fs, color, lw, min_len, label=True, below=False):
+    ax.plot([a, b], [y, y], color=color, lw=lw, zorder=4)
+    for xx in (a, b):
+        ax.plot([xx, xx], [y - 0.5 * off, y + 0.5 * off], color=color, lw=lw * 0.8, zorder=4)
+    if label and b - a >= min_len:
+        ax.text((a + b) / 2, y - off if below else y + off, f"{b - a:.2f}", fontsize=fs, fontweight="bold",
+                ha="center", va="top" if below else "bottom", zorder=8,
+                bbox=dict(fc="white", ec="none", pad=0.05, alpha=0.6))
+
+
+def _vseg(ax, a, b, x, off, fs, color, lw, min_len, label=True):
+    ax.plot([x, x], [a, b], color=color, lw=lw, zorder=4)
+    for yy in (a, b):
+        ax.plot([x - 0.5 * off, x + 0.5 * off], [yy, yy], color=color, lw=lw * 0.8, zorder=4)
+    if label and b - a >= min_len:
+        ax.text(x - off, (a + b) / 2, f"{b - a:.2f}", fontsize=fs, fontweight="bold", ha="right", va="center",
+                rotation=90, zorder=8, bbox=dict(fc="white", ec="none", pad=0.05, alpha=0.6))
+
+
+def _hv_chains(ax, P, axc, span, fs, tol, xl=None, yb=None, color=RED, lw=0.9, min_len=0.04):
+    """Cotas únicamente horizontales y verticales, como se replantea la malla en el frente con wincha:
+    - cada fila de taladros (misma altura) lleva una cadena horizontal que parte del eje vertical;
+    - la altura de cada fila respecto a la línea horizontal de referencia va en una cadena vertical al margen
+      izquierdo (xl), con una guía punteada hasta la fila;
+    - los taladros solos en su fila pero alineados en columna (hastiales, abanicos) se acotan con una cadena
+      vertical a lo largo de la columna, y la posición de la columna con una cadena horizontal al pie (yb)."""
+    off = 0.011 * span
+    rows = _cluster(P[:, 1], tol)
+    cols = _cluster(P[:, 0], tol)
+    rid = np.array([int(np.argmin([abs(y - r) for r in rows])) for y in P[:, 1]])
+    cid = np.array([int(np.argmin([abs(x - c) for c in cols])) for x in P[:, 0]])
+    rcount = np.bincount(rid, minlength=len(rows))
+    ccount = np.bincount(cid, minlength=len(cols))
+    colm = (rcount[rid] == 1) & (ccount[cid] >= 2)
+    row_levels, col_used = [], set()
+    last, flip = None, False
+    for k, yc in enumerate(rows):
+        m = (rid == k) & ~colm
+        if not m.any():
+            continue
+        flip = (not flip) if (last is not None and yc - last < 3.5 * off) else False
+        last = yc
+        nodes = sorted(set(np.round(np.r_[P[m, 0], axc[0]], 3)))
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            if b - a >= 1e-3:
+                _hseg(ax, a, b, yc, off, fs, color, lw, min_len, below=not flip and last is not None and
+                      k + 1 < len(rows) and rows[k + 1] - yc < 3.5 * off)
+        row_levels.append(yc)
+        if xl is not None:
+            ax.plot([xl, min(nodes)], [yc, yc], ls=":", lw=0.5, color="#888888", zorder=3)
+    for k, xc in enumerate(cols):
+        m = (cid == k) & colm
+        if not m.any():
+            continue
+        col_used.add(xc)
+        allc = cid == k
+        nodes = sorted(set(np.round(np.r_[P[allc, 1], axc[1]], 3)))
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            if b - a >= 1e-3:
+                _vseg(ax, a, b, xc, off, fs, color, lw, min_len)
+    if xl is not None and row_levels:
+        nodes = sorted(set(np.round(np.r_[row_levels, axc[1]], 3)))
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            if b - a >= 1e-3:
+                _vseg(ax, a, b, xl, off, fs, color, lw, min_len)
+        ax.plot([xl, axc[0]], [axc[1], axc[1]], ls=":", lw=0.5, color="#888888", zorder=3)
+    if yb is not None and col_used:
+        nodes = sorted(set(np.round(list(col_used) + [axc[0]], 3)))
+        for a, b in zip(nodes[:-1], nodes[1:]):
+            if b - a >= 1e-3:
+                _hseg(ax, a, b, yb, off, fs, color, lw, min_len)
+        for xc in col_used:
+            ax.plot([xc, xc], [yb, P[cid == cols.index(xc), 1].min()], ls=":", lw=0.5, color="#888888", zorder=3)
+
+
 def dims_drawing(res):
-    """Estándar de malla de perforación con las distancias entre taladros escritas sobre los tramos que los
-    unen (anillos del cuele, ayudas y contorno; filas y columnas en planta), como en los estándares de mina."""
+    """Estándar de malla de perforación con cotas solo horizontales y verticales desde dos ejes perpendiculares
+    de referencia (eje de la labor y línea horizontal por el centro del cuele; en planta, la cara libre x = 0 y el
+    eje del tajeo y = 0), que es como se replantea la malla en el frente."""
     h = _plan_holes(res)
     slot_alone = res.metodo.startswith("Chimenea slot")
     if res.labor == "Producción" and "grupo" in h and (h.grupo >= 0).any() and not slot_alone:
@@ -445,53 +521,45 @@ def dims_drawing(res):
         A = A[A[:, 0] <= crop + 0.05 * span]
         span = float(max(np.ptp(A[:, 0]), np.ptp(A[:, 1]), 0.5))
         A = np.vstack([A, [[crop + 0.32 * span, float(A[:, 1].mean())]]])
-    cc = res.p.get("cut_center")
     rel = res.relief
-    if ring_view and res.view2d.get("drill"):
-        center = tuple(res.view2d["drill"]["pivots"][0])
+    P = h[["x", "y"]].to_numpy(float)
+    D = np.hypot(P[:, None, 0] - P[None, :, 0], P[:, None, 1] - P[None, :, 1])
+    np.fill_diagonal(D, np.inf)
+    nn_med = float(np.median(D.min(axis=1)))
+    tol = max(0.02, 0.05 * nn_med)
+    # ejes de referencia
+    cc = res.p.get("cut_center")
+    if plan:
+        axc, axn = (0.0, 0.0), ("Cara libre (x = 0)", "Eje del tajeo (y = 0)")
+    elif ring_view and res.view2d.get("drill"):
+        axc, axn = tuple(res.view2d["drill"]["pivots"][0]), ("Eje vertical por el pivote", "Horizontal por el pivote")
+    elif rel is not None and len(rel):
+        axc, axn = (float(rel.x.mean()), float(rel.y.mean())), ("Eje de la labor", "Línea horizontal por el cuele")
     elif cc is not None:
-        center = tuple(cc)
-    elif rel is not None and len(rel) and not plan:
-        center = (float(rel.x.mean()), float(rel.y.mean()))
+        axc, axn = tuple(cc), ("Eje de la labor", "Línea horizontal por el cuele")
     elif out is not None:
-        center = (float(out[:, 0].mean()), float(out[:, 1].mean()))
+        axc = ((out[:, 0].min() + out[:, 0].max()) / 2, (out[:, 1].min() + out[:, 1].max()) / 2)
+        axn = ("Eje de la labor", "Línea horizontal de referencia")
     else:
-        center = (float(h.x.mean()), float(h.y.mean()))
-    P, E, C = _mesh_edges(res, h, center, plan)
-    fs = 6.4 if len(h) < 70 else (5.4 if len(h) < 140 else 4.6)
-    # ejes por el centro del cuele (frentes con alivios) o de la sección
-    if not plan and not ring_view:
-        x0, y0 = A.min(axis=0)
-        x1, y1 = A.max(axis=0)
-        if rel is not None and len(rel):
-            axc = (float(rel.x.mean()), float(rel.y.mean()))
-        elif out is not None:
-            axc = ((out[:, 0].min() + out[:, 0].max()) / 2, (out[:, 1].min() + out[:, 1].max()) / 2)
-        else:
-            axc = center
-        ax.plot([axc[0], axc[0]], [y0, y1], color="#1f77b4", lw=0.8, zorder=2)
-        ax.plot([x0, x1], [axc[1], axc[1]], color="#222222", lw=0.8, zorder=2)
-    for i, j in E:
-        _edge_label(ax, P[i], P[j], center, span, fs)
-    if plan:      # cadena de burden entre filas, debajo de la malla
-        yb = float(P[:, 1].min()) - 0.05 * span
-        for xa, xb in zip(C[:-1], C[1:]):
-            _edge_label(ax, (xa, yb), (xb, yb), (0.0, 1e9), span, fs, line_color=RED, lw=0.7, ls=(0, (3, 2)))
-            for xx in (xa, xb):
-                ax.plot([xx, xx], [yb - 0.008 * span, yb + 0.008 * span], color=RED, lw=0.7, zorder=4)
-        if len(C) > 1:
-            ax.text(C[0], yb - 0.03 * span, "B (burden entre filas)", fontsize=6, color=RED, va="top")
-        C = []
-    for i, j in C:
-        _edge_label(ax, P[i], P[j], center, span, fs, line_color=RED, lw=0.7, ls=(0, (3, 2)))
-    # taladros (negros) y alivios (círculos abiertos), como el estándar de mina
+        axc, axn = (float(h.x.mean()), float(h.y.mean())), ("Eje vertical", "Eje horizontal")
+    x0, y0 = A.min(axis=0)
+    x1, y1 = A.max(axis=0)
+    ax.plot([axc[0], axc[0]], [y0, y1], color="#1f77b4", lw=1.0, zorder=2)
+    ax.plot([x0, x1], [axc[1], axc[1]], color="#222222", lw=1.0, zorder=2)
+    fs = 6.2 if len(h) < 70 else (5.3 if len(h) < 140 else 4.5)
+    ox0 = float(out[:, 0].min()) if out is not None else float(P[:, 0].min())
+    oy0 = float(out[:, 1].min()) if out is not None else float(P[:, 1].min())
+    xl = min(ox0, float(P[:, 0].min())) - 0.035 * span
+    yb = min(oy0, float(P[:, 1].min())) - 0.035 * span
+    _hv_chains(ax, P, axc, span, fs, tol, xl=xl, yb=yb)
+    # taladros (negros) y alivios (círculos abiertos)
     rmark = max(0.009 * span, 0.028)
     for x, y in P:
         ax.add_patch(Circle((x, y), rmark, fc="#111111", ec="#111111", lw=0.4, zorder=6))
     if rel is not None and len(rel) and not ring_view:
         for _, r in rel.iterrows():
             ax.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, rmark), fc="white", ec="#111111", lw=0.9, zorder=6))
-    # cotas generales de la sección
+    # ubicación de los ejes respecto a la labor y cotas generales
     if out is not None:
         xo0, yo0 = out.min(axis=0)
         xo1, yo1 = out.max(axis=0)
@@ -500,10 +568,15 @@ def dims_drawing(res):
             ax.text(crop, (yo0 + yo1) / 2, f"  … la malla se repite\n  hasta {xo1:.1f} m", fontsize=7, va="center",
                     color="#1f3b73", zorder=8, bbox=dict(fc="white", ec="none", pad=0.3))
             xo1 = crop
-        _dim(ax, (xo0, yo0), (xo1, yo0), -off, f"{xo1 - xo0:.2f} m" + (" (tramo típico)" if crop else ""), True,
+        _dim(ax, (xo0, yo0), (xo1, yo0), -2.6 * off, f"{xo1 - xo0:.2f} m" + (" (tramo típico)" if crop else ""), True,
              "#1f3b73", 7.5)
-        _dim(ax, (xo0, yo0), (xo0, yo1), -off, f"{yo1 - yo0:.2f} m", False, "#1f3b73", 7.5)
-        A = np.vstack([A, [[xo0 - 1.6 * off, yo0 - 1.6 * off]]])
+        _dim(ax, (xo0, yo0), (xo0, yo1), -2.6 * off, f"{yo1 - yo0:.2f} m", False, "#1f3b73", 7.5)
+        if not plan:
+            if xo0 < axc[0] < xo1:
+                _dim(ax, (xo0, yo0), (axc[0], yo0), -1.8 * off, f"{axc[0] - xo0:.2f} (eje)", True, "#1f77b4", 7)
+            if yo0 < axc[1] < yo1:
+                _dim(ax, (xo0, yo0), (xo0, axc[1]), -1.8 * off, f"{axc[1] - yo0:.2f}", False, "#1f77b4", 7)
+        A = np.vstack([A, [[xo0 - 3.3 * off, yo0 - 3.3 * off]]])
     # detalle ampliado del cuele cuando es pequeño frente a la sección
     cutz = [z for z in res.zone_order if z.startswith(("Arranque", "Cuadrante", "Slot: arranque", "Slot: cuadrante"))]
     inner = [z for z in cutz if z in ("Arranque", "Cuadrante 1", "Cuadrante 2", "Slot: arranque", "Slot: cuadrante 1")]
@@ -512,37 +585,35 @@ def dims_drawing(res):
         cext = float(max(np.ptp(g.x), np.ptp(g.y)))
         if 0 < cext < 0.3 * span:
             ia = ax.inset_axes([1.03, 0.04, 0.36, 0.50])
-            gi = g.reset_index(drop=True)
-            Pg, Eg, Cg = _mesh_edges(res, gi, center, False)
+            Pg = g[["x", "y"]].to_numpy(float)
             sp_i = max(cext, 0.3)
-            for i, j in Eg:
-                _edge_label(ia, Pg[i], Pg[j], center, sp_i, 5.8)
-            for i, j in Cg:
-                _edge_label(ia, Pg[i], Pg[j], center, sp_i, 5.8, lw=0.7, ls=(0, (3, 2)))
-            m_ = 0.2 * sp_i
-            ia.plot([center[0]] * 2, [gi.y.min() - m_, gi.y.max() + m_], color="#1f77b4", lw=0.7)
-            ia.plot([gi.x.min() - m_, gi.x.max() + m_], [center[1]] * 2, color="#222222", lw=0.7)
+            m_ = 0.22 * sp_i
+            ia.plot([axc[0]] * 2, [Pg[:, 1].min() - m_, Pg[:, 1].max() + m_], color="#1f77b4", lw=0.8)
+            ia.plot([Pg[:, 0].min() - m_, Pg[:, 0].max() + m_], [axc[1]] * 2, color="#222222", lw=0.8)
+            _hv_chains(ia, Pg, axc, sp_i, 5.6, tol, xl=Pg[:, 0].min() - 0.12 * sp_i, min_len=0.0)
             if rel is not None and len(rel):
                 for _, r in rel.iterrows():
                     ia.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, 0.012 * sp_i), fc="white", ec="#111111",
                                         lw=0.8, zorder=6))
-                    ia.text(r.x, r.y - 0.06 * sp_i, f"Ø{r.d_mm:.0f}", fontsize=4.8, ha="center", va="top")
             for x, y in Pg:
                 ia.add_patch(Circle((x, y), 0.018 * sp_i, fc="#111111", ec="#111111", zorder=6))
-            ia.set_xlim(gi.x.min() - m_, gi.x.max() + m_)
-            ia.set_ylim(gi.y.min() - m_, gi.y.max() + m_)
+            ia.set_xlim(Pg[:, 0].min() - m_, Pg[:, 0].max() + m_)
+            ia.set_ylim(Pg[:, 1].min() - m_, Pg[:, 1].max() + m_)
             ia.set_aspect("equal")
             ia.tick_params(labelsize=5)
             ia.set_title("Detalle del cuele (m)", fontsize=7)
-            ax.add_patch(plt.Rectangle((gi.x.min() - m_, gi.y.min() - m_), np.ptp(gi.x) + 2 * m_,
-                                       np.ptp(gi.y) + 2 * m_, fill=False, ls="--", lw=0.6, ec="#555555", zorder=3))
+            ax.add_patch(plt.Rectangle((Pg[:, 0].min() - m_, Pg[:, 1].min() - m_), np.ptp(Pg[:, 0]) + 2 * m_,
+                                       np.ptp(Pg[:, 1]) + 2 * m_, fill=False, ls="--", lw=0.6, ec="#555555", zorder=3))
     ax.scatter([], [], s=24, c="#111111", label=f"Taladros cargados ({len(h)})")
     if rel is not None and len(rel) and not ring_view:
         ax.scatter([], [], s=30, facecolors="white", edgecolors="#111111", label=f"Taladros de alivio ({len(rel)})")
-    ax.plot([], [], color=RED, lw=1.0, label="Distancia entre taladros (m)")
-    ax.plot([], [], color=RED, lw=0.7, ls=(0, (3, 2)), label="Burden entre anillos / filas (m)")
+    ax.plot([], [], color="#1f77b4", lw=1.0, label=axn[0])
+    ax.plot([], [], color="#222222", lw=1.0, label=axn[1])
+    ax.plot([], [], color=RED, lw=0.9, label="Cota horizontal / vertical (m)")
     ax.legend(fontsize=6.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False, title="Leyenda",
               title_fontsize=7)
+    ax.text(1.01, 0.60, "Replanteo: medir cada taladro\nen horizontal desde el eje\nvertical y en vertical desde la\n"
+                        "línea horizontal de referencia.", transform=ax.transAxes, fontsize=6.3, va="top")
     return _finish(fig, ax, res, A, span, f"ESTÁNDAR DE MALLA DE PERFORACIÓN — {res.metodo}".upper()[:95], pad=0.06)
 
 
