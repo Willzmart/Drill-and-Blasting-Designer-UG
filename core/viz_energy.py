@@ -4,7 +4,7 @@ from __future__ import annotations
 import numpy as np
 import plotly.graph_objects as go
 
-from .viz import _box, _ring
+from .viz import _box, _equal_scene, _ring, stope_traces
 
 SCALE_KG = [[0, "#f7fbff"], [0.15, "#c6dbef"], [0.35, "#6baed6"], [0.55, "#fdd49e"], [0.75, "#fc8d59"],
             [0.9, "#d7301f"], [1, "#7f0000"]]
@@ -76,7 +76,8 @@ def energy_3d(res, seg, iso=None, show_shell=True, height=720):
         elif sc.get("kind") == "vertical":
             fig.add_trace(_ring(sc["outline"], "xy", 0.0, "Contorno del frente"))
         elif "box" in sc:
-            fig.add_trace(_box(*sc["box"], "Bloque / tajeo"))
+            for tr in stope_traces(sc, False):
+                fig.add_trace(tr)
     el = seg["q"] * seg["e"]
     vmin, vmax = float(el.min()), float(max(el.max(), el.min() + 1e-6))
     xs, ys, zs, cs = [], [], [], []
@@ -107,11 +108,13 @@ def energy_3d(res, seg, iso=None, show_shell=True, height=720):
     ext = A.max(axis=0) - A.min(axis=0)
     ext = np.where(ext > 1e-6, ext, 1e-6)
     eye = dict(x=-1.25, y=-2.1, z=0.75) if sc.get("kind") == "tunnel" else dict(x=1.6, y=-1.8, z=1.0)
-    scene = dict(xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Z (m)", aspectmode="data",
-                 camera=dict(eye=eye, up=dict(x=0, y=0, z=1)))
-    if ext.max() / max(ext.min(), 1e-6) > 4:
-        rr = np.clip(ext / ext.max(), 0.3, 1.0) * 1.4
-        scene.update(aspectmode="manual", aspectratio=dict(x=rr[0], y=rr[1], z=rr[2]))
+    pts = [A]
+    for tr in fig.data:
+        if isinstance(tr, (go.Scatter3d, go.Mesh3d)) and tr.x is not None and len(tr.x):
+            pts.append(np.c_[[v if v is not None else np.nan for v in tr.x],
+                             [v if v is not None else np.nan for v in tr.y],
+                             [v if v is not None else np.nan for v in tr.z]].astype(float))
+    scene = _equal_scene(pts, eye)
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=40, b=0), scene=scene,
                       title="Energía de las cargas en 3D", legend=dict(orientation="h", y=-0.02))
     return fig

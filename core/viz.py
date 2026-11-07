@@ -98,6 +98,11 @@ def _drill_overlay(fig, d):
         fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor="rgba(31,119,180,0.10)",
                                  line=dict(color="#1f77b4", width=2), name="Labor de perforación" if k == 0 else None,
                                  showlegend=k == 0, hoverinfo="skip"))
+    for k, oco in enumerate(d.get("others", [])):
+        x, y = _xy(oco)
+        fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor="rgba(44,160,44,0.10)",
+                                 line=dict(color="#2ca02c", width=2), name="Galería del otro nivel" if k == 0 else None,
+                                 showlegend=k == 0, hoverinfo="skip"))
     xs, ys = [], []
     for fx, fy in d.get("feed", []):
         xs += list(fx) + [None]
@@ -163,7 +168,7 @@ def section_view(res, height=620):
     x, y = _xy(sv["stope"])
     fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor=ROCK_FILL, line=dict(color="#333", width=2),
                              name="Tajeo", hoverinfo="skip"))
-    _drill_overlay(fig, dict(drift=sv["drifts"], carousels=sv["carousels"]))
+    _drill_overlay(fig, dict(drift=sv["drifts"], carousels=sv["carousels"], others=sv.get("others", [])))
     for ok in (True, False):
         xs, ys = [], []
         for hx, hy, a, _ in sv["holes"]:
@@ -234,6 +239,23 @@ def _ring(coords, plane, c, name, dash=None, color="#444"):
                         hoverinfo="skip")
 
 
+def _equal_scene(pts, eye):
+    """Escena 3D con la MISMA escala en X, Y y Z (cubo de lado igual al mayor rango): el diseño se ve en sus
+    proporciones reales."""
+    scene = dict(xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Z (m)", aspectmode="cube",
+                 camera=dict(eye=eye, up=dict(x=0, y=0, z=1)))
+    if not pts:
+        scene["aspectmode"] = "data"
+        return scene
+    A = np.vstack(pts)
+    lo, hi = np.nanmin(A, axis=0), np.nanmax(A, axis=0)
+    c = (lo + hi) / 2
+    half = max(float(np.nanmax(hi - lo)) / 2 * 1.04, 0.5)
+    for ax, k in zip(("xaxis", "yaxis", "zaxis"), range(3)):
+        scene[ax] = dict(range=[c[k] - half, c[k] + half], title=f"{'XYZ'[k]} (m)")
+    return scene
+
+
 def _box(x0, x1, y0, y1, z0, z1, name, color="#555"):
     P = [(x0, y0, z0), (x1, y0, z0), (x1, y1, z0), (x0, y1, z0), (x0, y0, z1), (x1, y0, z1), (x1, y1, z1), (x0, y1, z1)]
     E = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4), (0, 4), (1, 5), (2, 6), (3, 7)]
@@ -243,6 +265,42 @@ def _box(x0, x1, y0, y1, z0, z1, name, color="#555"):
         ys += [P[a][1], P[b][1], None]
         zs += [P[a][2], P[b][2], None]
     return go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color=color, width=3), name=name, hoverinfo="skip")
+
+
+DRIFT_COLORS = ["#1f77b4", "#2ca02c", "#9467bd"]
+
+
+def stope_traces(sc, show_shell=True):
+    """Tajeo (prisma de su sección real, inclinada si corresponde), chimenea slot y galerías de cada nivel,
+    todo en la misma escala."""
+    out = []
+    if "box" not in sc:
+        return out
+    bx = sc["box"]
+    if sc.get("stope_sec"):
+        sec = sc["stope_sec"]
+        if show_shell:
+            out.append(_prism(sec, "yz", bx[0], bx[1], 0.05, "Tajeo", "#8a8a8a"))
+        out.append(_ring(sec, "yz", bx[0], "Contorno del tajeo", None, "#555"))
+        out.append(_ring(sec, "yz", bx[1], "Contorno del tajeo (fin)", None, "#555"))
+    else:
+        out.append(_box(*bx, "Bloque / tajeo"))
+    if sc.get("slot_sec") and sc.get("slot_box"):
+        x0, x1 = sc["slot_box"][0], sc["slot_box"][1]
+        out.append(_prism(sc["slot_sec"], "yz", x0, x1, 0.16, "Chimenea / cámara slot (cara libre)", "#d62728"))
+        out.append(_ring(sc["slot_sec"], "yz", x0, "Slot (contorno)", None, "#d62728"))
+    elif sc.get("slot_box"):
+        out.append(_box(*sc["slot_box"], "Chimenea / cámara slot (cara libre)", "#d62728"))
+    elif sc.get("slot"):
+        x0, x1, y0, y1, z0, z1 = bx
+        out.append(_box(x0 - 2.0, x0, y0, y1, z0, z1, "Corte lateral (cara libre)", "#d62728"))
+    for kd, t in enumerate(sc.get("drifts3d", [])):
+        dco, x0, x1 = t[0], t[1], t[2]
+        nm = t[3] if len(t) > 3 else "Labor de perforación"
+        col = DRIFT_COLORS[kd % len(DRIFT_COLORS)]
+        out.append(_prism(dco, "yz", x0, x1, 0.20, nm, col))
+        out.append(_ring(dco, "yz", x0, nm + " (sección)", None, col))
+    return out
 
 
 def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_stem=True, zones=None, seq=None,
@@ -279,17 +337,8 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
                                      "Labor excavada"))
         eye = dict(x=1.6, y=-1.6, z=0.9 if up else 1.4)
     else:
-        if "box" in sc:
-            fig.add_trace(_box(*sc["box"], "Bloque / tajeo"))
-            if sc.get("slot_box"):
-                fig.add_trace(_box(*sc["slot_box"], "Chimenea / cámara slot (cara libre)", "#d62728"))
-            elif sc.get("slot"):
-                x0, x1, y0, y1, z0, z1 = sc["box"]
-                fig.add_trace(_box(x0 - 2.0, x0, y0, y1, z0, z1, "Corte lateral (cara libre)", "#d62728"))
-            for kd, (dco, x0, x1) in enumerate(sc.get("drifts3d", [])):
-                nm = "Labor de perforación" + (f" {kd + 1}" if len(sc["drifts3d"]) > 1 else "")
-                fig.add_trace(_prism(dco, "yz", x0, x1, 0.18, nm, "#1f77b4"))
-                fig.add_trace(_ring(dco, "yz", x0, nm + " (contorno)", None, "#1f77b4"))
+        for tr in stope_traces(sc, show_shell):
+            fig.add_trace(tr)
         eye = dict(x=1.7, y=-2.0, z=1.1)
 
     def pt(r, s):
@@ -360,15 +409,7 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
             pts.append(np.c_[[v if v is not None else np.nan for v in tr.x],
                              [v if v is not None else np.nan for v in tr.y],
                              [v if v is not None else np.nan for v in tr.z]].astype(float))
-    scene = dict(xaxis_title="X (m)", yaxis_title="Y (m)", zaxis_title="Z (m)", aspectmode="data",
-                 camera=dict(eye=eye, up=dict(x=0, y=0, z=1)))
-    if pts:
-        A = np.vstack(pts)
-        ext = np.nanmax(A, axis=0) - np.nanmin(A, axis=0)
-        ext = np.where(ext > 1e-6, ext, 1e-6)
-        if ext.max() / max(min(ext), 1e-6) > 4:
-            r = np.clip(ext / ext.max(), 0.3, 1.0) * 1.4
-            scene.update(aspectmode="manual", aspectratio=dict(x=r[0], y=r[1], z=r[2]))
+    scene = _equal_scene(pts, eye)
     fig.update_layout(height=height, margin=dict(l=0, r=0, t=40, b=0),
                       title="Vista 3D: taladros, retacado, carga e iniciación", scene=scene,
                       legend=dict(orientation="h", x=0, y=-0.02, yanchor="top", font=dict(size=11)))

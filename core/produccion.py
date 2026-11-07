@@ -123,6 +123,8 @@ class ProdOptions:
     ring_dip: float = 90.0        # abanicos: inclinación del plano del anillo (90 = vertical)
     slot_on: bool = True          # chimenea slot como cara libre inicial
     slot: SlotOptions | None = None
+    other_on: bool = True         # dibujar la galería del otro nivel (inferior o superior)
+    other: DrillSetup | None = None  # sección de esa galería (kind, ancho, alto, drift_y = desplazamiento lateral)
     rod_ft: float = 5.0           # longitud de barra
 
 
@@ -436,7 +438,22 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         vol = min(o.rows_blast, nr) * B * ring_area
         sources = [(t[0], t[1]) for t in toes]
         scene.update(box=(0, o.length, -AV / 2, AV / 2, z_lo, o.drift_h + z_hi),
-                     drifts3d=[(list(drift_polygon(ds).exterior.coords), 0.0, o.length)])
+                     drifts3d=[(list(drift_polygon(ds).exterior.coords), 0.0, o.length,
+                                "Galería de perforación (subnivel)")])
+        if o.other_on:
+            od = o.other or DrillSetup()
+            op = drift_polygon(od, od.drift_y, 0.0)
+            others = []
+            if o.fan_type != "Descendente":
+                others.append(("Galería superior (nivel siguiente)", affinity.translate(op, 0, o.drift_h + z_hi)))
+            if o.fan_type != "Ascendente":
+                others.append(("Galería inferior", affinity.translate(op, 0, z_lo - op.bounds[3])))
+            for nm, pg in others:
+                scene["drifts3d"].append((list(pg.exterior.coords), 0.0, o.length, nm))
+                lg.add(F_d, nm, "—", f"{od.kind.split(' (')[0]} {od.width:.2f} × {od.height:.2f} m", "",
+                       "piso en el tope del abanico" if "superior" in nm else "techo en el fondo del abanico")
+            P["drill2d"]["others"] = [list(affinity.scale(pg, 1.0, kz, origin=(0, 0)).exterior.coords)
+                                      for _, pg in others]
         if o.ring_dip < 89.9:
             xlabel, ylabel = "Ancho del tajeo y (m)", "Distancia en el plano del anillo z' (m)"
         Lm = np.mean([a for a, _, _ in Ls]) if Ls else 10
@@ -724,6 +741,12 @@ def _add_slot(res, rock, ex, o: ProdOptions, rows, order, scene, lg, outline, li
     res.p["slot"] = dict(kg=float(hs.kg.sum()), n=len(hs), n_rel=len(rl), drill=float(hs.L.sum() + rl.L.sum()),
                          thick=thick, widen=widen, H=H)
     x0, x1 = -thick, 0.0
+    cot = math.cos(math.radians(dip)) / math.sin(math.radians(dip)) if dip < 89.99 else 0.0
+    yA, yB = (-W / 2, W / 2) if widen else (-so2.a / 2, so2.a / 2)
+    shs = side * H * cot
+    scene["slot_sec"] = [(yA, base + H), (yB, base + H), (yB - shs, base), (yA - shs, base), (yA, base + H)]
+    if scene.get("drifts3d"):     # las galerías también cubren el tramo del slot
+        scene["drifts3d"] = [(t[0], min(t[1], x0), *t[2:]) for t in scene["drifts3d"]]
     scene["slot_box"] = (x0, x1, -W / 2 if widen else -so2.a / 2, W / 2 if widen else so2.a / 2, base, base + H)
     if m != PROD_METHODS[2]:
         lines2d.append(([x0, x1, x1, x0, x0], [-W / 2, -W / 2, W / 2, W / 2, -W / 2] if widen else
@@ -742,16 +765,17 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
     H = float(h.Z0.max())
     W = o.width
     narrow = res.metodo == PROD_METHODS[1]
+    from dataclasses import replace as _rep
     if ds.full_width:
-        from dataclasses import replace as _rep
         ds = _rep(ds, kind="Rectangular", width=W + 0.4, n_drifts=1, drift_y=0.0)
-    centers, span = drift_centers(ds, W, narrow)
+    ds = _rep(ds, n_drifts=1)                      # siempre una sola labor de perforación por nivel
     sec = ds.section()
+    centers, span = [ds.drift_y], max(sec.floor_width - ds.car_w, 0.5)
     lg.add(F_d, "Labor de perforación", "—", ("Cámara de ancho completo " if (o.drill and o.drill.full_width) else "")
            + f"{ds.kind.split(' (')[0]} {ds.width:.2f} × {ds.height:.2f} m", "",
            f"piso en la cota del techo del tajeo (z = {H:.1f} m)")
-    lg.add(F_d, "N° de labores de perforación", "n", len(centers), "",
-           "dato" if ds.n_drifts else f"automático: ancho del tajeo / (recorrido útil del pivote {span:.2f} m + carrusel)")
+    lg.add(F_d, "N° de labores de perforación", "n", 1, "",
+           f"una por nivel; recorrido útil del pivote {span:.2f} m")
     lg.add(F_d, "Pivote del equipo", "h_p", ds.pivot_h, "m", "sobre el piso de la labor (1.3–1.5 m)")
     lg.add(F_d, "Rectángulo del carrusel", "a × h", f"{ds.car_w:.2f} × {ds.car_h:.2f}", "m", "depende del equipo")
     drifts = [drift_polygon(ds, c, H) for c in centers]
@@ -776,8 +800,8 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
     first = h[h.grupo == h[h.grupo >= 0].grupo.min()]
     if n_bad:
         res.warnings.append(f"{n_bad} taladro(s) quedan fuera del alcance del equipo: el carrusel no cabe en la labor "
-                            f"al alinear el pivote con el eje del taladro. Agregue labores de perforación, ensánchelas, "
-                            f"o cambie a taladros en abanico.")
+                            f"al alinear el pivote con el eje del taladro. Ensanche la labor, perfore desde una cámara de "
+                            f"ancho completo o cambie a taladros en abanico.")
     lg.add(F_d, "Taladros fuera del alcance del equipo", "—", n_bad, "", "carrusel centrado en el pivote fuera de la labor")
     if o.width > len(centers) * sec.floor_width + 1e-6:
         lg.add(F_d, "Ancho cubierto por las labores", "—", f"{len(centers) * sec.floor_width:.1f} de {o.width:.1f} m", "", "")
@@ -800,15 +824,32 @@ def _parallel_drilling(res, o: ProdOptions, scene, lg):
         ang = feed_angle(rr.uy, rr.uz)
         for k in (int(np.argmin(ys)), int(np.argmax(ys))):
             car2d.append(list(carousel(ds, pv2d[k][:2], ang).exterior.coords))
+    others = []
+    if o.other_on:
+        od = o.other or DrillSetup()
+        op = drift_polygon(od, od.drift_y - sh, 0.0)
+        op = affinity.translate(op, 0, -op.bounds[3])          # techo de la galería en el fondo del tajeo
+        nm = "Galería inferior (cara libre / undercut)" if res.metodo == PROD_METHODS[3] else \
+            "Galería inferior (extracción)"
+        others.append((nm, op))
+        lg.add(F_d, nm, "—", f"{od.kind.split(' (')[0]} {od.width:.2f} × {od.height:.2f} m", "",
+               "techo en el fondo del tajeo" + ("; los taladros pasantes salen a ella" if o.breakthrough else
+                                                f"; puente de {o.toe_gap:.2f} m (taladros ciegos)"))
     res.p["section_view"] = dict(stope=stope, drifts=[list(d.exterior.coords) for d in drifts], holes=holes2d,
-                                 charges=ch2d, pivots=pv2d, carousels=car2d, H=H)
+                                 charges=ch2d, pivots=pv2d, carousels=car2d, H=H,
+                                 others=[list(pg.exterior.coords) for _, pg in others])
     for c in centers:
         res.view2d.setdefault("lines", [])
         hw = sec.floor_width / 2
         L0 = scene.get("box", (0, o.length))[1] if scene.get("box") else o.length
         res.view2d["lines"] += [([0, L0], [c - hw, c - hw]), ([0, L0], [c + hw, c + hw])]
     x0, x1 = (scene["box"][0], scene["box"][1]) if scene.get("box") else (0.0, o.length)
-    scene["drifts3d"] = [(list(d.exterior.coords), x0, x1) for d in drifts]
+    if scene.get("slot_box"):
+        x0 = min(x0, scene["slot_box"][0])
+    nm0 = "Cámara de perforación (nivel superior)" if ds.full_width else "Galería de perforación (nivel superior)"
+    scene["drifts3d"] = [(list(drifts[0].exterior.coords), x0, x1, nm0)] + \
+        [(list(pg.exterior.coords), x0, x1, nm) for nm, pg in others]
+    scene["stope_sec"] = stope
 
 
 def _kg_per_blast(res, o):

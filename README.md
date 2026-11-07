@@ -108,6 +108,20 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Vista 3D a escala real, galerías de cada nivel y nuevas láminas del PDF
+- **Vista 3D (y 3D de energía) con la misma escala en X, Y y Z**: ya no se comprimen los ejes; el diseño se ve en
+  sus proporciones reales.
+- **Taladros largos: una sola labor de perforación por nivel** (sin galerías superpuestas). El tajeo se dibuja como
+  prisma de su sección real (inclinada si los taladros paralelos lo están) y la chimenea slot con su inclinación.
+- **Galería del otro nivel** (expander *Labor de perforación y equipo*): galería inferior de extracción / undercut
+  bajo el tajeo en taladros paralelos y VCR; en abanicos, galería superior (ascendentes), inferior (descendentes) o
+  ambas. Sección, ancho, alto y desplazamiento lateral configurables; aparece en 3D, en la sección y en el PDF.
+- **PDF**: dos láminas nuevas después del plano general:
+  1. *Estándar de malla de perforación*: cotas entre taladros (cadena inferior y lateral, espaciamiento del contorno
+     a lo largo del perímetro, distancia de cada taladro a su vecino más cercano y detalle ampliado del cuele).
+  2. *Distribución del accesorio de iniciación*: tiempo de salida de cada taladro (ms) y flechas de la secuencia.
+     Si no se calculó la secuencia, se usa una por defecto (heurística; por filas en producción).
+
 ### Chimenea slot integrada, giro del carrusel y carguío de taladros largos
 - **Chimenea slot en cada método de taladros largos** (LBH, vetas angostas, abanicos/subniveles; opcional en VCR, que
   usa el corte inferior como cara libre): expander *Chimenea slot (cara libre inicial)*. La chimenea se diseña con el

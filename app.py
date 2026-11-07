@@ -430,11 +430,10 @@ try:
                     chh = c2.number_input("Carrusel: alto (m)", 0.2, 3.0, 0.8, 0.05)
                     cdz = c1.number_input("Carrusel: desfase vertical (m)", -1.5, 1.5, 0.0, 0.05,
                                           help="Posición del centro del rectángulo respecto al pivote.")
-                    nd, dy_ = 0, 0.0
+                    nd, dy_ = 1, 0.0
                     if parallel and not full:
-                        nd = c2.number_input("N° de galerías (0 = automático)", 0, 10, 0)
-                        if method == PROD_METHODS[1]:
-                            dy_ = st.number_input("Eje de la galería respecto al eje de la veta (m)", -3.0, 3.0, 0.0, 0.05)
+                        dy_ = st.number_input("Eje de la galería respecto al eje del tajeo (m)", -10.0, 10.0, 0.0, 0.05,
+                                              help="Se perfora desde una sola galería por nivel.")
                     st.markdown("**Capacidad del equipo de taladros largos**")
                     c1, c2 = st.columns(2)
                     po.Lmax_ft = c1.number_input("Longitud máxima (pies)", 30.0, 200.0, 102.0, 1.0,
@@ -443,6 +442,22 @@ try:
                     po.drill = DrillSetup(kind=dk if not full else "Rectangular", width=dw, height=dh, radius=dr, top_w=dtw,
                                           pivot_h=ph, pivot_y=py_, car_w=cw, car_h=chh, car_dz=cdz, n_drifts=int(nd),
                                           drift_y=dy_, full_width=full)
+                    lvl = "inferior" if parallel else {"Ascendente": "superior", "Descendente": "inferior"}.get(
+                        po.fan_type, "superior e inferior")
+                    st.markdown(f"**Galería del otro nivel ({lvl})**")
+                    po.other_on = st.checkbox(f"Dibujar la galería {lvl}", True, key="oth_on",
+                                              help="Galería de extracción / undercut bajo el tajeo (taladros paralelos) o "
+                                                   "galería del nivel siguiente hacia donde llegan los abanicos.")
+                    if po.other_on:
+                        ok_ = st.selectbox("Sección de la galería", GALLERY_TYPES, index=0, key="oth_k")
+                        c1, c2 = st.columns(2)
+                        ow = c1.number_input("Ancho (m) ", 2.0, 10.0, 4.0, 0.1, key="oth_w")
+                        oh = c2.number_input("Alto (m) ", 2.0, 10.0, 4.0, 0.1, key="oth_h")
+                        orr = min(1.0, ow / 2) if ok_.startswith("Baúl") else None
+                        otw = round(0.8 * ow, 2) if ok_.startswith("Trap") else None
+                        ody = c1.number_input("Desplazamiento lateral (m)", -10.0, 10.0, 0.0, 0.1, key="oth_dy")
+                        po.other = DrillSetup(kind=ok_, width=ow, height=oh, radius=orr, top_w=otw, drift_y=ody)
+                    st.caption("Una sola labor de perforación por nivel; el carrusel gira con el 'dip' de cada taladro.")
             if method in PROD_METHODS[:4]:
                 with st.sidebar.expander("Chimenea slot (cara libre inicial)", expanded=False):
                     po.slot_on = st.checkbox("Incluir chimenea slot", method != PROD_METHODS[3], key=f"so{method[:6]}",
@@ -1032,15 +1047,25 @@ with tabs[6]:
                 revisor=c1.text_input("Revisado por", ""), labor=labor,
                 observaciones=c2.text_input("Observaciones", ""))
     inc_e = c3.checkbox("Incluir el mapa de energía (pestaña Energía)", True)
-    inc_s = c3.checkbox("Incluir los retardos (si hay secuencia)", True)
+    inc_s = c3.checkbox("Incluir la malla de tiempos y retardos", True,
+                        help="Si no se calculó la secuencia, se usa una por defecto (heurística; por filas en producción).")
     if st.button("Generar PDF", type="primary"):
         el = ss.get("energy_last")
+        seq_pdf = ss.seq if ss.seq is not None else None
+        if seq_pdf is None and inc_s:
+            try:      # secuencia por defecto (heurística o por filas) para la malla de tiempos del PDF
+                opt_d = dict(classic=classic, qmax=max(float(qmax), float(q_unit.max()) + 1e-6), nmax=int(nmax),
+                             cut_single=cut_single, method="Por filas" if prod else "Heurística", time_limit=tl,
+                             link=link, carpio_gap=carpio_gap, simultaneous=res.simultaneous if sim_on else set())
+                seq_pdf, _ = sq.run_sequencing(H, res.sources, opt_d, system, cfg, RMR)
+            except Exception:  # noqa: BLE001
+                seq_pdf = None
         with st.spinner("Generando el PDF…"):
             pdf = report.build_pdf(res, info, pdf_params + [("Macizo (RMR · RQD · σci · ρ)",
                                                              f"{RMR} · {RQD} % · {UCS:.0f} MPa · {rho_r:.2f} t/m³"),
                                                             ("Iniciación", system)],
-                                   seq=ss.seq if (inc_s and ss.seq is not None) else None,
-                                   energy=el if (inc_e and el and el.get("sig") == sig) else None)
+                                   seq=seq_pdf if inc_s else None,
+                                   energy=el if (inc_e and el and el.get("sig") == sig) else None, system=system)
         ss.pdf_bytes = pdf
     if ss.get("pdf_bytes"):
         st.download_button("Descargar PDF del diseño", ss.pdf_bytes, f"diseno_{labor.lower()}.pdf", "application/pdf")
