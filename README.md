@@ -117,8 +117,11 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   bajo el tajeo en taladros paralelos y VCR; en abanicos, galería superior (ascendentes), inferior (descendentes) o
   ambas. Sección, ancho, alto y desplazamiento lateral configurables; aparece en 3D, en la sección y en el PDF.
 - **PDF**: dos láminas nuevas después del plano general:
-  1. *Estándar de malla de perforación*: cotas entre taladros (cadena inferior y lateral, espaciamiento del contorno
-     a lo largo del perímetro, distancia de cada taladro a su vecino más cercano y detalle ampliado del cuele).
+  1. *Estándar de malla de perforación* (estilo de estándar de mina): líneas rojas que unen los taladros de cada
+     anillo (cuadrantes del cuele, ayudas, contorno, arrastres) con la distancia escrita sobre cada tramo, tramo
+     punteado con el burden entre un anillo y el siguiente, ejes por el centro del cuele y detalle ampliado del cuele.
+     En planta (producción) se acota cada fila con su espaciamiento y la cadena de burden entre filas; en tajeos muy
+     largos se acota un tramo típico.
   2. *Distribución del accesorio de iniciación*: tiempo de salida de cada taladro (ms) y flechas de la secuencia.
      Si no se calculó la secuencia, se usa una por defecto (heurística; por filas en producción).
 

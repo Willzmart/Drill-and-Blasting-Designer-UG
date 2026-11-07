@@ -316,163 +316,234 @@ def _cluster(vals, tol):
     return [float(np.mean(c)) for c in out]
 
 
-def dims_drawing(res):
-    """Estándar de malla de perforación: distancias entre taladros acotadas (cadenas inferior y lateral,
-    espaciamiento del contorno, detalle del cuele y distancia de cada taladro a su vecino más cercano)."""
-    h = _plan_holes(res)
-    if res.labor == "Producción" and "grupo" in h and (h.grupo >= 0).any() and not res.metodo.startswith("Chimenea"):
-        h = h[h.grupo >= 0]
-    if len(h) < 2:
-        return None
-    fig, ax, out, A, span = _base_axes(res, h)
+RED = "#d62728"
+
+
+def _ring_edges(P, center, closed_gap=2.2):
+    """Ordena un anillo de taladros por ángulo alrededor del centro y une los consecutivos; si el anillo no
+    rodea al centro queda abierto (se corta en el mayor vacío angular)."""
+    n = len(P)
+    if n < 2:
+        return []
+    ang = np.arctan2(P[:, 1] - center[1], P[:, 0] - center[0])
+    order = np.argsort(ang)
+    a = ang[order]
+    gaps = np.diff(np.r_[a, a[0] + 2 * np.pi])
+    k = int(np.argmax(gaps))
+    closed = gaps[k] < np.radians(100) and n >= 3
+    if not closed:
+        order = np.r_[order[k + 1:], order[:k + 1]]
+    E = [(order[t], order[t + 1]) for t in range(n - 1)]
+    if closed:
+        E.append((order[-1], order[0]))
+    return E
+
+
+def _grid_edges(P, cone=30.0):
+    """Malla en planta: cada taladro se une a su vecino más cercano hacia +x y hacia +y."""
+    E = set()
+    for i in range(len(P)):
+        for ux, uy in ((1, 0), (0, 1)):
+            d = P - P[i]
+            L = np.hypot(d[:, 0], d[:, 1])
+            cosang = (d[:, 0] * ux + d[:, 1] * uy) / np.where(L > 0, L, np.inf)
+            ok = (L > 1e-6) & (cosang >= math.cos(math.radians(cone)))
+            if ok.any():
+                j = int(np.argmin(np.where(ok, L, np.inf)))
+                E.add(tuple(sorted((i, j))))
+    return sorted(E)
+
+
+def _edge_label(ax, p, q, center, span, fs=6.3, color="#111111", lw=1.0, line_color=RED, ls="-", z=4):
+    (ax_, ay), (bx, by) = p, q
+    d = math.hypot(bx - ax_, by - ay)
+    if d < 0.03:
+        return
+    ax.plot([ax_, bx], [ay, by], color=line_color, lw=lw, ls=ls, zorder=z)
+    mx, my = (ax_ + bx) / 2, (ay + by) / 2
+    nx_, ny_ = -(by - ay) / d, (bx - ax_) / d                      # normal al tramo
+    if (mx - center[0]) * nx_ + (my - center[1]) * ny_ < 0:      # rótulo hacia afuera del centro
+        nx_, ny_ = -nx_, -ny_
+    off = 0.012 * span
+    rot = math.degrees(math.atan2(by - ay, bx - ax_))
+    rot = rot - 180 if rot > 90 else (rot + 180 if rot <= -90 else rot)
+    ax.text(mx + nx_ * off, my + ny_ * off, f"{d:.2f}", fontsize=fs, fontweight="bold", color=color, rotation=rot,
+            rotation_mode="anchor", ha="center", va="center", zorder=8,
+            bbox=dict(fc="white", ec="none", pad=0.05, alpha=0.6))
+
+
+def _mesh_edges(res, h, center, plan):
+    """Tramos a acotar: anillos por zona (frentes) o filas y columnas (planta), más un tramo representativo
+    entre cada anillo y el anillo siguiente hacia afuera (burden entre anillos)."""
     P = h[["x", "y"]].to_numpy(float)
     D = np.hypot(P[:, None, 0] - P[None, :, 0], P[:, None, 1] - P[None, :, 1])
     np.fill_diagonal(D, np.inf)
-    nn = np.min(D, axis=1)
-    tol = 0.2 * float(np.median(nn))
-    rmark = max(0.010 * span, 0.03)
-    for _, r in h.iterrows():
-        ax.add_patch(Circle((r.x, r.y), rmark, fc="#1531c9", ec="#0b1b6e", lw=0.5, zorder=6))
-    x0, y0 = A.min(axis=0)
-    x1, y1 = A.max(axis=0)
-    off = 0.045 * span
-    ring = bool(res.p.get("view_filter"))
-    # cadena inferior: taladros de la fila más baja
-    low = h[h.y <= h.y.min() + tol] if not ring else h.iloc[0:0]
-    xs = _cluster(low.x, tol)
-    xb = [out[:, 0].min(), out[:, 0].max()] if out is not None else []
-    _chain(ax, xs, y0, -off, True)
-    if out is not None and len(xs) and (xs[0] - xb[0] > 0.05 or xb[1] - xs[-1] > 0.05):
-        _dim(ax, (xb[0], y0), (xb[1], y0), -2.2 * off, f"{xb[1] - xb[0]:.2f} m", True, "#1f3b73", 7.5)
-    # cadena lateral izquierda: taladros de la columna izquierda
-    left = h[h.x <= h.x.min() + tol] if not ring else h.iloc[0:0]
-    ys = _cluster(left.y, tol)
-    _chain(ax, ys, x0, -off, False)
-    if out is not None:
-        _dim(ax, (x0, out[:, 1].min()), (x0, out[:, 1].max()), -2.2 * off, f"{np.ptp(out[:, 1]):.2f} m", False,
-             "#1f3b73", 7.5)
-    used = set(low.id) | set(left.id)
-    # contorno superior (corona / contorno / taladros del abanico): espaciamiento a lo largo del perímetro
-    perim_z = {"Corona", "Contorno", "Hastiales"}
-    per = h[h.zona.isin(perim_z)] if res.labor != "Producción" else h.iloc[0:0]
-    if res.p.get("view_filter"):
-        per = h
-    if len(per) >= 2:
-        cx, cy = (out[:, 0].mean(), out[:, 1].mean()) if out is not None else (P[:, 0].mean(), P[:, 1].mean())
-        if res.p.get("view_filter") and res.view2d.get("drill"):
-            cx, cy = res.view2d["drill"]["pivots"][0]
-        ang = np.arctan2(per.y - cy, per.x - cx)
-        pp = per.assign(a=ang).sort_values("a")
-        q = pp[["x", "y"]].to_numpy(float)
-        for (ax_, ay), (bx, by) in zip(q[:-1], q[1:]):
-            dd = math.hypot(bx - ax_, by - ay)
-            if dd < 0.05 or dd > 4 * float(np.median(nn)) + 1e-9:
-                continue
-            mx, my = (ax_ + bx) / 2, (ay + by) / 2
-            nx_, ny_ = mx - cx, my - cy
-            nr = math.hypot(nx_, ny_) or 1.0
-            tx, ty = mx + nx_ / nr * 0.035 * span, my + ny_ / nr * 0.035 * span
-            rot = math.degrees(math.atan2(by - ay, bx - ax_))
-            rot = rot - 180 if rot > 90 else (rot + 180 if rot < -90 else rot)
-            ax.plot([ax_, bx], [ay, by], color="#777777", lw=0.5, zorder=3)
-            ax.text(tx, ty, f"{dd:.2f}m", fontsize=6.5, rotation=rot, ha="center", va="center", zorder=7,
-                    bbox=dict(fc="white", ec="none", pad=0.2))
-        used |= set(per.id)
-    # detalle del cuele: distancia de cada taladro al centro y lado de cada cuadrante
-    cutz = [z for z in res.zone_order if z.startswith(("Arranque", "Cuadrante", "Slot: arranque", "Slot: cuadrante"))]
+    nn_med = float(np.median(D.min(axis=1)))
+    if plan:     # filas de la voladura (x constante) con su espaciamiento; filas en y solo si no es tresbolillo
+        tol = 0.25 * float(D.min(axis=1).min())
+        E = []
+        xc = _cluster(P[:, 0], tol)
+        for c in xc:
+            ii = np.where(np.abs(P[:, 0] - c) <= tol + 1e-9)[0]
+            ii = ii[np.argsort(P[ii, 1])]
+            E += [(a, b) for a, b in zip(ii[:-1], ii[1:]) if D[a, b] <= 3.0 * nn_med]
+        dxm = float(np.median(np.diff(xc))) if len(xc) > 1 else np.inf
+        for c in _cluster(P[:, 1], tol):
+            ii = np.where(np.abs(P[:, 1] - c) <= tol + 1e-9)[0]
+            ii = ii[np.argsort(P[ii, 0])]
+            ez = [(a, b) for a, b in zip(ii[:-1], ii[1:])]
+            if ez and np.median([D[a, b] for a, b in ez]) <= 1.3 * dxm:
+                E += ez
+        return P, E, xc
+    zones = list(dict.fromkeys(h.zona))
+    idx = {z: np.where(h.zona.values == z)[0] for z in zones}
+    E = []
+    for z in zones:
+        ii = idx[z]
+        ez = [(ii[a], ii[b]) for a, b in _ring_edges(P[ii], center)]
+        if not ez:
+            continue
+        Lz = np.array([D[a, b] for a, b in ez])
+        lim = max(2.3 * float(np.median(Lz)), 1.2 * nn_med)
+        E += [(a, b) for (a, b), L in zip(ez, Lz) if L <= min(lim, 4.0 * nn_med)]
+    # tramo entre anillos: zona -> la siguiente hacia afuera (radio medio mayor)
+    rad = {z: float(np.mean(np.hypot(P[idx[z], 0] - center[0], P[idx[z], 1] - center[1]))) for z in zones}
+    zs = sorted(zones, key=lambda z: rad[z])
+    C = []
+    for k, z in enumerate(zs[:-1]):
+        outer = [w for w in zs[k + 1:] if rad[w] > rad[z] + 1e-6][:1]
+        for w in outer:
+            sub = D[np.ix_(idx[z], idx[w])]
+            a, b = np.unravel_index(int(np.argmin(sub)), sub.shape)
+            i, j = idx[z][a], idx[w][b]
+            if (i, j) not in E and (j, i) not in E and D[i, j] <= 4.0 * nn_med:
+                C.append((i, j))
+    return P, E, C
+
+
+def dims_drawing(res):
+    """Estándar de malla de perforación con las distancias entre taladros escritas sobre los tramos que los
+    unen (anillos del cuele, ayudas y contorno; filas y columnas en planta), como en los estándares de mina."""
+    h = _plan_holes(res)
+    slot_alone = res.metodo.startswith("Chimenea slot")
+    if res.labor == "Producción" and "grupo" in h and (h.grupo >= 0).any() and not slot_alone:
+        h = h[h.grupo >= 0]
+    if len(h) < 2:
+        return None
+    h = h.reset_index(drop=True)
+    ring_view = bool(res.p.get("view_filter"))
+    plan = res.labor == "Producción" and not slot_alone and not ring_view
+    crop = None
+    vo = np.asarray(res.view2d["outline"]) if res.view2d.get("outline") else None
+    if plan and vo is not None:        # tajeos muy alargados: se acota un tramo típico (la malla se repite)
+        ex_, ey_ = np.ptp(vo[:, 0]), np.ptp(vo[:, 1])
+        if ey_ > 0 and ex_ / ey_ > 3.2:
+            crop = float(vo[:, 0].min() + max(3.2 * ey_, 3.5 * float(h.B.median() if "B" in h else 1.0)))
+            h = h[h.x <= crop].reset_index(drop=True)
+    fig, ax, out, A, span = _base_axes(res, h)
+    if crop is not None:
+        A = A[A[:, 0] <= crop + 0.05 * span]
+        span = float(max(np.ptp(A[:, 0]), np.ptp(A[:, 1]), 0.5))
+        A = np.vstack([A, [[crop + 0.32 * span, float(A[:, 1].mean())]]])
     cc = res.p.get("cut_center")
-    cut = h[h.zona.isin(cutz)]
-    inner = [z for z in cutz if z in ("Arranque", "Cuadrante 1", "Slot: arranque", "Slot: cuadrante 1")]
-    cext = float(max(np.ptp(cut[cut.zona.isin(inner)].x), np.ptp(cut[cut.zona.isin(inner)].y))) \
-        if len(cut[cut.zona.isin(inner)]) else 0.0
-    zoom = len(cut) > 0 and 0 < cext < 0.22 * span
-    if zoom:     # detalle ampliado del cuele (arranque y primer cuadrante)
-        ia = ax.inset_axes([1.03, 0.06, 0.34, 0.46])
-        ccz = res.p.get("cut_center") or (float(cut.x.mean()), float(cut.y.mean()))
-        g = cut[cut.zona.isin(inner)]
-        rel = res.relief
+    rel = res.relief
+    if ring_view and res.view2d.get("drill"):
+        center = tuple(res.view2d["drill"]["pivots"][0])
+    elif cc is not None:
+        center = tuple(cc)
+    elif rel is not None and len(rel) and not plan:
+        center = (float(rel.x.mean()), float(rel.y.mean()))
+    elif out is not None:
+        center = (float(out[:, 0].mean()), float(out[:, 1].mean()))
+    else:
+        center = (float(h.x.mean()), float(h.y.mean()))
+    P, E, C = _mesh_edges(res, h, center, plan)
+    fs = 6.4 if len(h) < 70 else (5.4 if len(h) < 140 else 4.6)
+    # ejes por el centro del cuele (frentes con alivios) o de la sección
+    if not plan and not ring_view:
+        x0, y0 = A.min(axis=0)
+        x1, y1 = A.max(axis=0)
         if rel is not None and len(rel):
-            for _, r in rel.iterrows():
-                ia.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, 0.02), fc="#e8531f", ec="#8a2a08", lw=0.6))
-        for z in inner:
-            gz = g[g.zona == z]
-            if gz.empty:
-                continue
-            q = gz.assign(a=np.arctan2(gz.y - ccz[1], gz.x - ccz[0])).sort_values("a")[["x", "y"]].to_numpy(float)
-            if len(q) >= 3:
-                qq = np.vstack([q, q[:1]])
-                ia.plot(qq[:, 0], qq[:, 1], lw=0.6, color="#555555")
-                for (ax_, ay), (bx, by) in zip(qq[:-1], qq[1:]):
-                    ia.text((ax_ + bx) / 2, (ay + by) / 2, f"{math.hypot(bx - ax_, by - ay):.2f}", fontsize=5.6,
-                            ha="center", va="center", bbox=dict(fc="white", ec="none", pad=0.1, alpha=0.85))
-            for (px, py) in q:
-                ia.add_patch(Circle((px, py), 0.022 * max(cext, 0.3) * 2, fc="#1531c9", ec="#0b1b6e", lw=0.4))
-                if z in ("Arranque", "Slot: arranque"):
-                    ia.plot([ccz[0], px], [ccz[1], py], ls=":", lw=0.6, color="#c0392b")
-                    ia.text((ccz[0] + px) / 2, (ccz[1] + py) / 2, f"{math.hypot(px - ccz[0], py - ccz[1]):.2f}",
-                            fontsize=5.4, color="#c0392b", ha="center", va="center",
-                            bbox=dict(fc="white", ec="none", pad=0.05, alpha=0.8))
-        m_ = 0.18 * max(cext, 0.3)
-        ia.set_xlim(g.x.min() - m_, g.x.max() + m_)
-        ia.set_ylim(g.y.min() - m_, g.y.max() + m_)
-        ia.set_aspect("equal")
-        ia.tick_params(labelsize=5)
-        ia.set_title("Detalle del cuele (m)", fontsize=7)
-        ax.add_patch(plt.Rectangle((g.x.min() - m_, g.y.min() - m_), np.ptp(g.x) + 2 * m_, np.ptp(g.y) + 2 * m_,
-                                   fill=False, ls="--", lw=0.6, ec="#c0392b", zorder=4))
-    if len(cut):
-        if cc is None:
-            rel = res.relief
-            cc = (float(rel.x.mean()), float(rel.y.mean())) if rel is not None and len(rel) else \
-                (float(cut.x.mean()), float(cut.y.mean()))
-        for z in cutz:
-            g = h[h.zona == z]
-            if g.empty:
-                continue
-            a2 = np.arctan2(g.y - cc[1], g.x - cc[0])
-            q = g.assign(a=a2).sort_values("a")[["x", "y"]].to_numpy(float)
-            if zoom and z in inner:
-                continue
-            if z.endswith("rranque") or z == "Slot: arranque":
-                for (px, py) in q:
-                    ax.plot([cc[0], px], [cc[1], py], ls=":", lw=0.6, color="#c0392b", zorder=4)
-                    ax.text((cc[0] + px) / 2, (cc[1] + py) / 2, f"{math.hypot(px - cc[0], py - cc[1]):.2f}",
-                            fontsize=5.8, color="#c0392b", ha="center", va="center", zorder=7,
-                            bbox=dict(fc="white", ec="none", pad=0.1, alpha=0.8))
-            if len(q) >= 3:
-                qq = np.vstack([q, q[:1]])
-                ax.plot(qq[:, 0], qq[:, 1], lw=0.6, color="#555555", zorder=3)
-                k = int(np.argmax(qq[:-1, 1] + qq[1:, 1]))     # lado superior: rótulo del lado del cuadrante
-                (ax_, ay), (bx, by) = qq[k], qq[k + 1]
-                ax.text((ax_ + bx) / 2, (ay + by) / 2, f"{math.hypot(bx - ax_, by - ay):.2f}", fontsize=6.2,
-                        ha="center", va="bottom", zorder=7, bbox=dict(fc="white", ec="none", pad=0.1, alpha=0.85))
-        ax.plot([cc[0]], [cc[1]], marker="+", color="#c0392b", ms=8, mew=1.0, zorder=8)
-        used |= set(cut.id)
-    # resto: distancia al vecino más cercano (sin repetir pares); en producción bastan las cadenas B y S
-    if len(h) <= 160 and res.labor != "Producción":
-        ids = h.id.to_numpy()
-        done = set()
-        for i in range(len(h)):
-            if ids[i] in used:
-                continue
-            j = int(np.argmin(D[i]))
-            key = tuple(sorted((ids[i], ids[j])))
-            if key in done:
-                continue
-            done.add(key)
-            (ax_, ay), (bx, by) = P[i], P[j]
-            ax.annotate("", xy=(bx, by), xytext=(ax_, ay), zorder=4,
-                        arrowprops=dict(arrowstyle="<->", color="#1f3b73", lw=0.6, shrinkA=3, shrinkB=3))
-            ax.text((ax_ + bx) / 2, (ay + by) / 2, f"{D[i, j]:.2f}", fontsize=6, color="#1f3b73", ha="center",
-                    va="center", zorder=7, bbox=dict(fc="white", ec="none", pad=0.15, alpha=0.85))
-    ax.scatter([], [], s=28, c="#1531c9", label=f"Taladros cargados ({len(h)})")
-    if res.relief is not None and len(res.relief) and not res.p.get("view_filter"):
-        ax.scatter([], [], s=28, c="#e8531f", label=f"Taladros de alivio ({len(res.relief)})")
+            axc = (float(rel.x.mean()), float(rel.y.mean()))
+        elif out is not None:
+            axc = ((out[:, 0].min() + out[:, 0].max()) / 2, (out[:, 1].min() + out[:, 1].max()) / 2)
+        else:
+            axc = center
+        ax.plot([axc[0], axc[0]], [y0, y1], color="#1f77b4", lw=0.8, zorder=2)
+        ax.plot([x0, x1], [axc[1], axc[1]], color="#222222", lw=0.8, zorder=2)
+    for i, j in E:
+        _edge_label(ax, P[i], P[j], center, span, fs)
+    if plan:      # cadena de burden entre filas, debajo de la malla
+        yb = float(P[:, 1].min()) - 0.05 * span
+        for xa, xb in zip(C[:-1], C[1:]):
+            _edge_label(ax, (xa, yb), (xb, yb), (0.0, 1e9), span, fs, line_color=RED, lw=0.7, ls=(0, (3, 2)))
+            for xx in (xa, xb):
+                ax.plot([xx, xx], [yb - 0.008 * span, yb + 0.008 * span], color=RED, lw=0.7, zorder=4)
+        if len(C) > 1:
+            ax.text(C[0], yb - 0.03 * span, "B (burden entre filas)", fontsize=6, color=RED, va="top")
+        C = []
+    for i, j in C:
+        _edge_label(ax, P[i], P[j], center, span, fs, line_color=RED, lw=0.7, ls=(0, (3, 2)))
+    # taladros (negros) y alivios (círculos abiertos), como el estándar de mina
+    rmark = max(0.009 * span, 0.028)
+    for x, y in P:
+        ax.add_patch(Circle((x, y), rmark, fc="#111111", ec="#111111", lw=0.4, zorder=6))
+    if rel is not None and len(rel) and not ring_view:
+        for _, r in rel.iterrows():
+            ax.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, rmark), fc="white", ec="#111111", lw=0.9, zorder=6))
+    # cotas generales de la sección
+    if out is not None:
+        xo0, yo0 = out.min(axis=0)
+        xo1, yo1 = out.max(axis=0)
+        off = 0.06 * span
+        if crop is not None:
+            ax.text(crop, (yo0 + yo1) / 2, f"  … la malla se repite\n  hasta {xo1:.1f} m", fontsize=7, va="center",
+                    color="#1f3b73", zorder=8, bbox=dict(fc="white", ec="none", pad=0.3))
+            xo1 = crop
+        _dim(ax, (xo0, yo0), (xo1, yo0), -off, f"{xo1 - xo0:.2f} m" + (" (tramo típico)" if crop else ""), True,
+             "#1f3b73", 7.5)
+        _dim(ax, (xo0, yo0), (xo0, yo1), -off, f"{yo1 - yo0:.2f} m", False, "#1f3b73", 7.5)
+        A = np.vstack([A, [[xo0 - 1.6 * off, yo0 - 1.6 * off]]])
+    # detalle ampliado del cuele cuando es pequeño frente a la sección
+    cutz = [z for z in res.zone_order if z.startswith(("Arranque", "Cuadrante", "Slot: arranque", "Slot: cuadrante"))]
+    inner = [z for z in cutz if z in ("Arranque", "Cuadrante 1", "Cuadrante 2", "Slot: arranque", "Slot: cuadrante 1")]
+    g = h[h.zona.isin(inner)]
+    if len(g) >= 3 and not plan:
+        cext = float(max(np.ptp(g.x), np.ptp(g.y)))
+        if 0 < cext < 0.3 * span:
+            ia = ax.inset_axes([1.03, 0.04, 0.36, 0.50])
+            gi = g.reset_index(drop=True)
+            Pg, Eg, Cg = _mesh_edges(res, gi, center, False)
+            sp_i = max(cext, 0.3)
+            for i, j in Eg:
+                _edge_label(ia, Pg[i], Pg[j], center, sp_i, 5.8)
+            for i, j in Cg:
+                _edge_label(ia, Pg[i], Pg[j], center, sp_i, 5.8, lw=0.7, ls=(0, (3, 2)))
+            m_ = 0.2 * sp_i
+            ia.plot([center[0]] * 2, [gi.y.min() - m_, gi.y.max() + m_], color="#1f77b4", lw=0.7)
+            ia.plot([gi.x.min() - m_, gi.x.max() + m_], [center[1]] * 2, color="#222222", lw=0.7)
+            if rel is not None and len(rel):
+                for _, r in rel.iterrows():
+                    ia.add_patch(Circle((r.x, r.y), max(r.d_mm / 2000, 0.012 * sp_i), fc="white", ec="#111111",
+                                        lw=0.8, zorder=6))
+                    ia.text(r.x, r.y - 0.06 * sp_i, f"Ø{r.d_mm:.0f}", fontsize=4.8, ha="center", va="top")
+            for x, y in Pg:
+                ia.add_patch(Circle((x, y), 0.018 * sp_i, fc="#111111", ec="#111111", zorder=6))
+            ia.set_xlim(gi.x.min() - m_, gi.x.max() + m_)
+            ia.set_ylim(gi.y.min() - m_, gi.y.max() + m_)
+            ia.set_aspect("equal")
+            ia.tick_params(labelsize=5)
+            ia.set_title("Detalle del cuele (m)", fontsize=7)
+            ax.add_patch(plt.Rectangle((gi.x.min() - m_, gi.y.min() - m_), np.ptp(gi.x) + 2 * m_,
+                                       np.ptp(gi.y) + 2 * m_, fill=False, ls="--", lw=0.6, ec="#555555", zorder=3))
+    ax.scatter([], [], s=24, c="#111111", label=f"Taladros cargados ({len(h)})")
+    if rel is not None and len(rel) and not ring_view:
+        ax.scatter([], [], s=30, facecolors="white", edgecolors="#111111", label=f"Taladros de alivio ({len(rel)})")
+    ax.plot([], [], color=RED, lw=1.0, label="Distancia entre taladros (m)")
+    ax.plot([], [], color=RED, lw=0.7, ls=(0, (3, 2)), label="Burden entre anillos / filas (m)")
     ax.legend(fontsize=6.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False, title="Leyenda",
               title_fontsize=7)
-    ax.text(1.01, 0.02, "Cotas en metros", transform=ax.transAxes, fontsize=7)
-    A2 = np.vstack([A, [[x0 - 2.6 * off, y0 - 2.6 * off]]])
-    return _finish(fig, ax, res, A2, span, f"ESTÁNDAR DE MALLA DE PERFORACIÓN — {res.metodo}".upper()[:95], pad=0.06)
+    return _finish(fig, ax, res, A, span, f"ESTÁNDAR DE MALLA DE PERFORACIÓN — {res.metodo}".upper()[:95], pad=0.06)
 
 
 def section_drawing(res):
