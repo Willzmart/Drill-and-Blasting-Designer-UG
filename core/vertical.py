@@ -11,7 +11,7 @@ from shapely import affinity
 from shapely.geometry import Point, Polygon
 
 from .common import (KONYA_EQS, Explosive, Result, Rock, bmax_holmberg, bmax_langefors, colors_for,
-                     finalize_holes, konya_burden, new_hole, relief_row, summary_common)
+                     finalize_holes, konya_burden, new_hole, raise_dip_log, relief_row, summary_common)
 from .cuts import CUT_NOTES, CutCtx, make_cut
 from .facelayout import fill_helpers, uniform_contour
 
@@ -99,6 +99,7 @@ class VerticalOptions:
     B_override: float | None = None
     SB: float = 1.25
     Lmax_ft: float = 102.0        # capacidad del equipo de taladros largos (Simba)
+    dip_deg: float = 90.0         # inclinación de la chimenea respecto a la horizontal (90 = vertical)
 
 
 def _layout_face(vs, opening, cut_holes, relief, B_ring, SB, contour_S, contour_B, offset, center=(0, 0)):
@@ -452,6 +453,10 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
     res.scene3d = dict(kind="vertical", outline=list(vs.polygon.exterior.coords), up=up, advance=P.get("adv", 1.0),
                        length=o.length if o.method in long_methods else None)
     vol = vol or vs.area * P.get("adv", 1.0)
+    if labor == "Chimenea" and o.dip_deg < 89.99:
+        kind = {CHIMENEA_METHODS[0]: "manual", CHIMENEA_METHODS[1]: "jora", CHIMENEA_METHODS[2]: "alimak",
+                CHIMENEA_METHODS[5]: "vcr"}.get(o.method, "largos")
+        raise_dip_log(res, o.dip_deg, o.length, kind, None if o.method in long_methods else P.get("adv"))
     res.summary = summary_common(res, vol, rock.rho, cost, extra={"Avance por pega (m)": P.get("adv", np.nan),
                                                                    "Área de la sección (m²)": vs.area})
     rws = exm.rws * 100

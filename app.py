@@ -157,6 +157,8 @@ def slot_sidebar():
         so.a = c1.number_input("Lado x / diámetro (m)", 1.2, 6.0, 2.0, 0.1, key="sl_a")
         so.b = c2.number_input("Lado y (m)", 1.2, 6.0, so.a, 0.1, key="sl_b") if so.kind.startswith("Rect") else so.a
         so.L = c1.number_input("Longitud (altura entre subniveles, m)", 5.0, 80.0, 20.0, 0.5, key="sl_L")
+        so.dip_deg = float(st.slider("Inclinación de la chimenea — dip (°)", 45, 90, 90, key="sl_dip",
+                                     help="Longitud medida a lo largo del eje; 90 = vertical."))
         so.direction = st.radio("Perforación", SLOT_DIR, key="sl_dir")
         so.cut = st.selectbox("Diseño del cuele", SLOT_CUTS, key="sl_cut")
         so.blast = st.selectbox("Voladura", SLOT_BLAST, key="sl_bl",
@@ -196,7 +198,8 @@ def slot_sidebar():
             so.SB = st.slider("S/B del ensanche", 1.0, 1.2, 1.1, 0.05, key="sl_sb")
     r = run_slot(rock, sx, so, cost)
     params = [("Método", SLOT_METHOD), ("Sección", f"{so.kind} {so.a:.2f} × {so.b:.2f} m"), ("Longitud", f"{so.L:.1f} m"),
-              ("Perforación", so.direction), ("Cuele", so.cut), ("Voladura", so.blast),
+              ("Perforación", so.direction), ("Inclinación", f"{so.dip_deg:.0f}°"), ("Cuele", so.cut),
+              ("Voladura", so.blast),
               ("Ø cargados / vacíos", f"{so.D1_mm:.1f} / {so.D2_mm:.1f} mm × {so.NB}"),
               ("Equipo", f"Simba, capacidad {so.Lmax_ft:.0f} pies, barra {so.rod_ft:.0f} pies"), ("Explosivo", sx.label())]
     return r, sx, [sx], params
@@ -324,6 +327,11 @@ try:
                                    0.05) if method in (CHIMENEA_METHODS[6], PIQUE_METHODS[5]) else 1.5
             incl = st.slider("Inclinación de barrenos del cuele (° desde la horizontal)", 50, 75, 60) \
                 if method in (PIQUE_METHODS[2], PIQUE_METHODS[3]) else 60
+            vdip = 90
+            if labor == "Chimenea":
+                vdip = st.slider("Inclinación de la chimenea — dip (°)", 35, 90, 90,
+                                 help="Respecto a la horizontal (90 = vertical). La malla se diseña en la sección "
+                                      "perpendicular al eje y los taladros son paralelos al eje. Echaderos: ≥ 50–60°.")
         with st.sidebar.expander("Perforación y explosivo", expanded=False):
             dflt = {CHIMENEA_METHODS[3]: (64, 150, 1), CHIMENEA_METHODS[4]: (89, 102, 1), CHIMENEA_METHODS[5]: (114, 102, 1),
                     CHIMENEA_METHODS[6]: (64, 102, 1), CHIMENEA_METHODS[1]: (38, 127, 1),
@@ -352,13 +360,15 @@ try:
         vo = VerticalOptions(method=method, cut_type=cut_o, d1_mm=vd1, d2_mm=vd2, NB=int(vNB), bar_m=vbar * 0.3048,
                              eff=veff / 100, F=vF, length=length, tramo=tramo, contour=contour, d_central=dcen, Et=Et_v,
                              delta_o=dlo_v, k_vcr=kv, ratio_bloque=ratio_blk, inclin_deg=incl, B_override=ov[0],
-                             SB=ov[1] or 1.25, Lmax_ft=lmax_v)
+                             SB=ov[1] or 1.25, Lmax_ft=lmax_v, dip_deg=float(vdip))
         res = run_vertical(labor, vs, rock, vexp, vo, cost)
         main_exp = vexp
         used_exps = [vexp]
         pdf_params = [("Método", method), ("Sección", f"{vkind} {a:.2f} × {b:.2f} m"),
                       ("Ø producción / vacío", f"{vd1:.0f} / {vd2:.0f} mm × {int(vNB)}"), ("Barra", f"{vbar:.1f} pies"),
                       ("Explosivo", vexp.label()), ("Contorno", contour)]
+        if labor == "Chimenea":
+            pdf_params.append(("Inclinación de la chimenea", f"{vdip}°" + (" (vertical)" if vdip == 90 else "")))
     else:
         method = st.sidebar.selectbox("Método", PROD_METHODS + [SLOT_METHOD])
         if method == SLOT_METHOD:

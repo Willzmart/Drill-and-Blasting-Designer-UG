@@ -724,7 +724,7 @@ def _add_slot(res, rock, ex, o: ProdOptions, rows, order, scene, lg, outline, li
     a_t = min(so.a, W)                          # dimensión transversal de la chimenea: no más que el tajeo
     widen = so.widen and W > a_t + 0.5
     so2 = _rep(so, a=a_t, kind=so.kind if a_t == so.a else "Rectangular", L=H, widen=widen, slot_len=W,
-               Lmax_ft=o.Lmax_ft, rod_ft=o.rod_ft)
+               Lmax_ft=o.Lmax_ft, rod_ft=o.rod_ft, dip_deg=90.0)
     sr = run_slot(rock, ex, so2)
     thick = so2.slot_w if widen else so2.b
     xc = -thick / 2

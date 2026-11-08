@@ -85,6 +85,8 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
            "front": "Vista frontal / sección de la malla"}.get(v.get("kind"), "Malla")
     if res.p.get("view_filter"):
         ttl += " (primera sección del abanico)"
+    if res.p.get("tilt_deg"):
+        ttl += f" — sección perpendicular al eje (chimenea a {90 - res.p['tilt_deg']:.0f}°)"
     fig.update_layout(height=height, plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10), title=ttl,
                       legend=dict(x=1.02, y=1))
     return fig
@@ -258,6 +260,18 @@ def _ring(coords, plane, c, name, dash=None, color="#444"):
                         hoverinfo="skip")
 
 
+def _tilt_fig(fig, tilt):
+    from .common import tilt_xyz
+    for tr in fig.data:
+        if isinstance(tr, (go.Scatter3d, go.Mesh3d)) and tr.x is not None and len(tr.x):
+            xs = np.array([v if v is not None else np.nan for v in tr.x], dtype=float)
+            ys = np.array([v if v is not None else np.nan for v in tr.y], dtype=float)
+            zs = np.array([v if v is not None else np.nan for v in tr.z], dtype=float)
+            _, y2, z2 = tilt_xyz(xs, ys, zs, tilt)
+            tr.y = [None if np.isnan(v) else float(v) for v in y2]
+            tr.z = [None if np.isnan(v) else float(v) for v in z2]
+
+
 def _equal_scene(pts, eye):
     """Escena 3D con la MISMA escala en X, Y y Z (cubo de lado igual al mayor rango): el diseño se ve en sus
     proporciones reales."""
@@ -421,6 +435,9 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
             zs += [r.Z0, r.Z0 + r.uz * r.L, None]
         fig.add_trace(go.Scatter3d(x=xs, y=ys, z=zs, mode="lines", line=dict(color="#555", width=12),
                                    name="Vacío / alivio", hoverinfo="skip"))
+    if sc.get("tilt"):     # chimenea inclinada: se gira toda la escena alrededor del eje x
+        _tilt_fig(fig, sc["tilt"])
+        eye = dict(x=2.0, y=0.2, z=0.6)
     # proporciones: escenas muy alargadas (chimeneas, tajeos) se comprimen para que se vean completas
     pts = []
     for tr in fig.data:

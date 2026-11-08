@@ -108,6 +108,16 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Chimeneas inclinadas (dip)
+- Labor *Chimenea* (todos los métodos) y *Chimenea slot con Simba* (sola): deslizador "Inclinación de la chimenea —
+  dip" (90° = vertical). La malla se diseña en la sección perpendicular al eje y los taladros son paralelos al eje.
+- Memoria: longitud según el eje, altura vertical (L·sen δ), desplazamiento horizontal (L·cos δ), avance vertical por
+  pega y alargamiento de la sección horizontal (1/sen δ).
+- Avisos por método: manual y Alimak ≥ 45°, taladros largos / cráter / raise boring ≥ 55°, VCR ≥ 60°, jaula Jora
+  ≥ 70° (cuelga del cable del barreno central), y < 50° el material volado se desliza con dificultad.
+- Vista 3D girada con la inclinación real y cuadro de taladros del PDF con coordenadas, azimut e inclinación reales.
+  En la chimenea slot dentro de producción, la inclinación la da el método (taladros paralelos inclinados).
+
 ### Apartado "Macizo rocoso": un dominio o por dominios
 - **Un solo dominio litológico** (modo anterior): todo el diseño usa las mismas propiedades. Sirve para cuerpos
   masivos, redondeados o irregulares, o cuando no hay datos de las cajas. No se calcula sobrerotura por dominios.

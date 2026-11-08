@@ -21,7 +21,7 @@ import pandas as pd
 from shapely.geometry import Point, Polygon
 
 from .common import (KONYA_EQS, Explosive, Result, Rock, colors_for, finalize_holes, konya_burden, new_hole,
-                     relief_row, summary_common)
+                     raise_dip_log, relief_row, summary_common)
 from .cuts import _relief_positions, _sq
 from .facelayout import fill_helpers, uniform_contour
 from .sections import build_vertical_section
@@ -62,6 +62,7 @@ class SlotOptions:
     blind: bool = False             # perforación ciega (no conecta con la otra labor)
     toe_gap: float = 1.0            # ciega: distancia del fondo del taladro a la otra labor (m)
     widen: bool = False             # ensanche a cámara slot
+    dip_deg: float = 90.0           # inclinación de la chimenea slot (sola); en producción la da el método
     slot_len: float = 8.0           # cámara slot: dimensión transversal al tajeo (m)
     slot_w: float = 4.0             # cámara slot: dimensión a lo largo del tajeo (m)
     SB: float = 1.1
@@ -260,6 +261,8 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
                       if opening is not None else [], lines=lines, xlabel="x (m)", ylabel="y (m)",
                       dims=(o.a, o.b))
     res.scene3d = dict(kind="vertical", outline=outline, up=not down, advance=o.tramo, length=Ltot)
+    if o.dip_deg < 89.99:
+        raise_dip_log(res, o.dip_deg, Ltot, "largos")
     res.frag = dict(B=Bd, S=o.SB * Bd, q=q, Lc=max((o.tramo if o.blast.startswith("Por tramos") else L) - 0.5, 0.2),
                     H=o.tramo if o.blast.startswith("Por tramos") else L, d_mm=o.D1_mm, W=o.alpha * L,
                     rws=ex.rws * 100, modo="verificar", min_dim=vs.min_dim, ratio=3.0, B_limit=Bd, zona="destroza")

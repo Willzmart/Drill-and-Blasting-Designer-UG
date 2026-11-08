@@ -759,6 +759,11 @@ def hole_table_rows(res, seq=None):
         cols = [c for c in ("id", "periodo", "n_detonador", "t_ms", "mecha_m") if c in seq.columns]
         h = h.merge(seq[cols], on="id", how="left")
     rows = []
+    tilt = math.radians(res.p.get("tilt_deg", 0.0))
+    if tilt:      # chimenea inclinada: coordenadas y orientación reales
+        from .common import tilt_xyz
+        _, h["Y0"], h["Z0"] = tilt_xyz(h.X0, h.Y0, h.Z0, tilt)
+        _, h["uy"], h["uz"] = tilt_xyz(h.ux, h.uy, h.uz, tilt)
     for _, r in h.iterrows():
         az = (math.degrees(math.atan2(r.ux, r.uy)) + 360) % 360
         inc = math.degrees(math.asin(max(-1.0, min(1.0, r.uz))))

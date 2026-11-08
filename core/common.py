@@ -418,3 +418,53 @@ PALETTE = ["#d62728", "#ff7f0e", "#e6b800", "#9467bd", "#c51b8a", "#1f77b4", "#1
 
 def colors_for(order):
     return {z: PALETTE[i % len(PALETTE)] for i, z in enumerate(order)}
+
+
+
+def tilt_xyz(x, y, z, tilt_rad):
+    """Inclina una chimenea: rota alrededor del eje x de modo que el eje local z (eje de la chimenea) quede
+    inclinado 'tilt' respecto a la vertical, hacia +y. Devuelve (x, y', z')."""
+    c, s_ = math.cos(tilt_rad), math.sin(tilt_rad)
+    x = np.asarray(x, dtype=float)
+    y = np.asarray(y, dtype=float)
+    z = np.asarray(z, dtype=float)
+    return x, y * c + z * s_, -y * s_ + z * c
+
+
+RAISE_MIN_DIP = {   # inclinación mínima práctica por método de chimenea (°)
+    "manual": (45, "la roca volada no escurre por la chimenea y el personal trabaja sobre el material; las chimeneas "
+                   "convencionales inclinadas se usan entre 45° y 60° como echaderos"),
+    "jora": (70, "la jaula Jora cuelga del cable que pasa por el barreno central: requiere chimeneas verticales o "
+                 "subverticales"),
+    "alimak": (45, "la plataforma Alimak trepa por el riel y admite chimeneas inclinadas, pero con menos de 45° el "
+                   "material no escurre"),
+    "largos": (55, "con taladros largos la roca debe caer por gravedad al nivel inferior; además la desviación de "
+                   "taladros inclinados largos es mayor"),
+    "vcr": (60, "en VCR las cargas esféricas y los tapones deben quedar en su lugar y el material caer al nivel "
+                "inferior: se recomiendan taladros verticales o con inclinación ≥ 60°"),
+}
+
+
+def raise_dip_log(res, dip_deg, length, kind, adv=None):
+    """Registra la geometría de una chimenea inclinada y avisa si la inclinación no es práctica para el método."""
+    if dip_deg >= 89.99:
+        return
+    lg = res.log
+    F = "1b. Inclinación de la chimenea"
+    d = math.radians(dip_deg)
+    lg.add(F, "Inclinación (dip)", "δ", dip_deg, "°", "respecto a la horizontal; eje inclinado hacia +y")
+    lg.add(F, "Longitud a lo largo del eje", "L", length, "m", "los taladros son paralelos al eje")
+    lg.add(F, "Altura vertical ganada", "H", length * math.sin(d), "m", "L·sen δ")
+    lg.add(F, "Desplazamiento horizontal", "Δy", length * math.cos(d), "m", "L·cos δ")
+    if adv:
+        lg.add(F, "Avance vertical por pega", "a·sen δ", adv * math.sin(d), "m", f"avance según el eje {adv:.2f} m")
+    lg.add(F, "Sección del diseño", "—", "perpendicular al eje de la chimenea", "",
+           f"la sección horizontal es 1/sen δ = {1 / math.sin(d):.2f} veces más larga en el sentido del buzamiento")
+    mn, why = RAISE_MIN_DIP.get(kind, (50, "el material volado no escurre por gravedad"))
+    if dip_deg < mn:
+        res.warnings.append(f"Chimenea inclinada a {dip_deg:.0f}°: por debajo de ≈{mn}° para este método — {why}.")
+    elif dip_deg < 50:
+        res.warnings.append(f"Chimenea a {dip_deg:.0f}°: con menos de 50° la roca fragmentada se desliza con dificultad; "
+                            f"prevea limpieza o un ángulo mayor si es echadero.")
+    res.p["tilt_deg"] = 90.0 - dip_deg
+    res.scene3d["tilt"] = math.radians(90.0 - dip_deg)
