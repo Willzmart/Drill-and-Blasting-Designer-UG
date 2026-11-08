@@ -108,6 +108,16 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Apartado "Macizo rocoso": un dominio o por dominios
+- **Un solo dominio litológico** (modo anterior): todo el diseño usa las mismas propiedades. Sirve para cuerpos
+  masivos, redondeados o irregulares, o cuando no hay datos de las cajas. No se calcula sobrerotura por dominios.
+- **Por dominios: mineral, caja techo y caja piso**: cada dominio tiene RMR, GSI, RQD, σci, ρ, Q, E, σt y Vp (con su
+  VPP crítica). Cada método usa la información que le corresponde:
+  - Avance, chimenea y pique: las propiedades del dominio donde se excava la labor (mineral, caja techo o caja piso).
+  - Producción: burden y carga con el mineral; las cajas alimentan el expander de sobrerotura, dilución y
+    estabilidad (taladros largos, corte y relleno, cámaras y pilares; en mantos, techo = caja techo y piso = caja piso).
+  - Obras públicas (banqueo) usa el mineral.
+
 ### Macizo por dominios: caja techo, caja piso y techo (producción con taladros largos)
 - El apartado *Macizo rocoso* es el **mineral**. En el expander *Macizo por dominios* se ingresan la caja techo, la
   caja piso y, en abanicos ascendentes, el techo / corona (σt, E, ρ, Q o Vp) con su VPP crítica σt·Vp/E.
@@ -121,6 +131,17 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   dominios). En Energía (PPV) aparecen los umbrales de sobrerotura de cada caja. Avisos: carga dentro de la caja,
   ELOS > 0.5 m y riesgo de subrotura (mineral pegado).
 - En tresbolillo ya no se coloca un taladro sobre el contacto (fila desplazada a menos de S/4 de la caja).
+- **Corte y relleno (realce y breasting)**: también usa caja techo, caja piso y mineral. Las cajas diluyen; el techo
+  de la tajada es mineral de la siguiente tajada, así que su daño no diluye pero se reporta como daño al techo de
+  trabajo (desatado y sostenimiento). En realce el modo automático recorta la carga del extremo de los taladros que
+  llega al techo; el piso es relleno y no se evalúa.
+- **Cámaras y pilares (banqueo vertical y frontal)**: las paredes son los pilares (mineral) y se evalúan además el
+  techo (a banco + galería piloto) y el piso, cada uno marcado como estéril (diluye) o mineral. Con la sobrerotura de
+  los pilares se calcula el ancho efectivo w_ef = w − 2·ELOS y el FS del pilar por área tributaria
+  (σp = γ·H·((w + Wc)/w_ef)²) con Hedley–Grant (K·w^0.5/h^0.75) y Lunder–Pakalnis (0.44·σci·(0.68 + 0.52·κ)),
+  antes y después de la voladura; el techo se compara con la abertura máxima de Barton 2·ESR·Q^0.4 (cámara real
+  Wc + 2·ELOS y diagonal en las intersecciones). Tabla de pilares en el PDF.
+- **VCR sin chimenea slot**: su cara libre es el corte inferior (undercut).
 
 ### Vista 3D a escala real, galerías de cada nivel y nuevas láminas del PDF
 - **Vista 3D (y 3D de energía) con la misma escala en X, Y y Z**: ya no se comprimen los ejes; el diseño se ve en
@@ -141,8 +162,8 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
      Si no se calculó la secuencia, se usa una por defecto (heurística; por filas en producción).
 
 ### Chimenea slot integrada, giro del carrusel y carguío de taladros largos
-- **Chimenea slot en cada método de taladros largos** (LBH, vetas angostas, abanicos/subniveles; opcional en VCR, que
-  usa el corte inferior como cara libre): expander *Chimenea slot (cara libre inicial)*. La chimenea se diseña con el
+- **Chimenea slot en cada método de taladros largos** (LBH, vetas angostas, abanicos/subniveles; el VCR no la usa:
+  su cara libre es el corte inferior): expander *Chimenea slot (cara libre inicial)*. La chimenea se diseña con el
   cuele Konya o LJ, se ensancha de caja a caja (cámara slot) y la primera fila/anillo de producción sale hacia ella
   (x = 0) con el burden y espaciamiento de producción. Se dibuja en planta, en 3D y en el PDF; su explosivo y metraje
   se reportan aparte y no entran en la carga por voladura de producción. En la secuencia sale primero.

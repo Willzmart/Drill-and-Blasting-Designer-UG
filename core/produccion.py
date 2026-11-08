@@ -527,8 +527,9 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         for i in range(nx):
             x = (i + 1) * B
             for y in ys:
-                yy = y + (S / 2 if (o.staggered and i % 2 and ny > 1) else 0)
-                if abs(yy) > W / 2:
+                sh_ = S / 2 if (o.staggered and i % 2 and ny > 1) else 0
+                yy = y + sh_
+                if abs(yy) > W / 2 - (0.25 * S if sh_ else 0.0) + 1e-6:   # tresbolillo: no pegado al pilar
                     continue
                 cargas, tacos, T, Lch = charge_column(L, B, bottom=True)
                 add("Primera fila" if i == 0 else "Producción", i, x, yy, x, yy, Hb, (0, 0, -1), L, cargas, tacos, B, S)
@@ -603,9 +604,9 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             xlabel, ylabel = "Ancho y (m)", "Altura z (m)"
             frag = dict(B=B, S=S, q=q, Lc=L - o.k_T * max(10 * D, min(0.7 * B, 25 * D)), H=L, limit=Bm)
     slot_rel = None
-    if o.slot_on and m in PROD_METHODS[:4] and rows:
+    if o.slot_on and m in PROD_METHODS[:3] and rows:      # el VCR no lleva chimenea slot
         slot_rel, order = _add_slot(res, rock, ex, o, rows, order, scene, lg, outline, lines2d)
-    if o.domains is not None and o.domains.on and m in PROD_METHODS[:4] and rows:
+    if o.domains is not None and o.domains.on and m in DOMAIN_METHODS and rows:
         res.p["domains"] = apply_domains(rows, o, PROD_METHODS, o.domains, rock, ex.w_cart, lg, res.warnings)
     res.holes = finalize_holes(rows, order)
     Lmax = float(res.holes.L.max()) if len(res.holes) else 0.0
@@ -693,6 +694,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         res.summary["Estéril por sobrerotura (t/m)"] = dm["t_waste"]
         if dm["grade_dil"] is not None:
             res.summary[f"Ley diluida ({dm['unit']})"] = dm["grade_dil"]
+        for k, v in (dm.get("rp") or {}).get("summary", {}).items():
+            res.summary[k] = v
     res.frag = dict(B=frag["B"], S=frag["S"], q=frag["q"], Lc=max(frag["Lc"], 0.2), H=frag["H"], d_mm=o.D_mm,
                     W=o.e_coll + o.alpha * frag["H"], rws=ex.rws * 100, modo="optimizar", B_limit=frag["limit"],
                     K_override=frag.get("K_override"), zona="producción")
@@ -772,19 +775,22 @@ def _add_slot(res, rock, ex, o: ProdOptions, rows, order, scene, lg, outline, li
     return rl[["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"]].reset_index(drop=True), SLOT_ZONES + order
 
 
+DOMAIN_METHODS = PROD_METHODS[:8]
+
+
 def _domain_view(res, o, outline):
     """Cajas y líneas de sobrerotura en la vista 2D principal (planta de taladros paralelos o anillo)."""
     from .domains import domain_shapes
     dm = res.p["domains"]
-    if res.p.get("view_filter") or o.method == PROD_METHODS[2]:
-        regs, obs = domain_shapes(dm, band=max(1.0, 0.12 * o.width), kz=res.p.get("kz_ring", 1.0))
+    if res.p.get("view_filter") or o.method in (PROD_METHODS[2], PROD_METHODS[5], PROD_METHODS[7]):
+        regs, obs = domain_shapes(dm, band=max(0.5, 0.12 * o.width), kz=res.p.get("kz_ring", 1.0))
     else:
         xs = [p[0] for p in outline] if outline else [0.0, o.length]
         x0, x1 = min(xs), max(xs)
         band = max(0.6, 0.15 * o.width)
         regs, obs = [], []
         for c in dm["contacts"]:
-            if not c["name"].startswith("Caja"):
+            if abs(c["n"][0]) < 0.5:          # en planta solo las paredes (cajas o pilares), no techo ni piso
                 continue
             ya, ny = c["a"][0], c["n"][0]
             out = -1.0 if ny > 0 else 1.0

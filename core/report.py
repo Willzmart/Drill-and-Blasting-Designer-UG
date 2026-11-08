@@ -884,8 +884,22 @@ def build_pdf(res, info: dict, params: list, seq=None, energy=None, system="") -
         txt = (f"Dilución estimada: {100 * dm['dilution']:.1f} % (estéril / (mineral + estéril), por metro de corrida)."
                + (f" Ley diluida: {dm['grade_dil']:.3f} {dm['unit']} (in situ {dm['grade']:.3f})." if dm.get("grade_dil")
                   is not None else ""))
-        story.append(KeepTogether([Spacer(1, 4 * mm), Paragraph("Macizo por dominios: sobrerotura y dilución", st_h),
-                                   t, Spacer(1, 1.5 * mm), Paragraph(txt, st_n)]))
+        blk = [Spacer(1, 4 * mm), Paragraph("Macizo por dominios: sobrerotura y dilución", st_h), t,
+               Spacer(1, 1.5 * mm), Paragraph(txt, st_n)]
+        rp = dm.get("rp")
+        if rp:
+            d2 = [[Paragraph(x, st_th) for x in ("Pilar", "Ancho (m)", "σp (MPa)", "σs Hedley–Grant (MPa)",
+                                                 "σs Lunder–Pakalnis (MPa)", "FS H–G", "FS L–P")]]
+            for lab, ww, sp, shg, slp in rp["rows"]:
+                d2.append([lab.capitalize(), f"{ww:.2f}", f"{sp:.1f}", f"{shg:.1f}", f"{slp:.1f}", f"{shg / sp:.2f}",
+                           f"{slp / sp:.2f}"])
+            t2 = Table(d2, colWidths=[34 * mm, 22 * mm, 22 * mm, 36 * mm, 38 * mm, 20 * mm, 20 * mm])
+            t2.setStyle(_grid_style())
+            blk += [Spacer(1, 3 * mm), t2, Spacer(1, 1.5 * mm),
+                    Paragraph(f"Techo: abertura real {rp['w_real']:.2f} m (cámara + 2·ELOS de los pilares) frente a la "
+                              f"máxima sin sostenimiento de Barton {rp['wmax']:.2f} m (2·ESR·Q^0.4); en las "
+                              f"intersecciones {1.4142 * rp['w_real']:.2f} m.", st_n)]
+        story.append(KeepTogether(blk))
     if res.warnings:
         story.append(Spacer(1, 3 * mm))
         story.append(Paragraph("Advertencias: " + " · ".join(dict.fromkeys(res.warnings)), st_s))

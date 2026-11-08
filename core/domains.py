@@ -42,6 +42,15 @@ class DomainOptions:
     edge_mode: str = EDGE_MODES[0]
     edge_factor: float = 0.6
     elos_target: float = 0.3
+    # cámaras y pilares
+    floor: Rock | None = None         # roca del piso (None = mineral)
+    roof_waste: bool = True           # el techo es estéril (diluye) o mineral
+    floor_waste: bool = False         # el piso es estéril (diluye) o mineral
+    depth: float = 200.0              # profundidad bajo superficie (m)
+    h_head: float = 4.0               # altura de la galería piloto sobre el banco (m): techo a Hb + h_head
+    esr: float = 3.0                  # Barton: labores mineras temporales 3–5
+    K_hg: float = 133.0               # Hedley y Grant (MPa)
+    rho_over: float = 2.7             # densidad media del recubrimiento (t/m³)
 
 
 def ppv_hp(q, Lc, r, K, alpha):
@@ -72,7 +81,31 @@ def contacts(o, methods, dom: DomainOptions, ore: Rock):
     m = o.method
     W = o.width
     out = []
-    if m == methods[2]:
+    if m in (methods[4], methods[5]):     # cámaras y pilares: paredes = pilares (mineral), techo y piso
+        Hb = o.height
+        W = o.room
+        left, right = ((-W / 2, Hb), (-W / 2, 0.0)), ((W / 2, Hb), (W / 2, 0.0))
+        center = (0.0, Hb / 2)
+        area = W * Hb
+        roof = dom.back or ore
+        flo = dom.floor or ore
+        zt = Hb + dom.h_head
+        out = [dict(name="Pilar izquierdo", rock=ore, a=left[0], b=left[1], color="#ff7f0e", dilutes=False),
+               dict(name="Pilar derecho", rock=ore, a=right[0], b=right[1], color="#ff7f0e", dilutes=False),
+               dict(name="Techo" + (" (estéril)" if dom.roof_waste else " (mineral)"), rock=roof, a=(-W / 2, zt),
+                    b=(W / 2, zt), color="#8c564b", dilutes=dom.roof_waste),
+               dict(name="Piso" + (" (estéril)" if dom.floor_waste else " (mineral)"), rock=flo, a=(-W / 2, 0.0),
+                    b=(W / 2, 0.0), color="#7f7f7f", dilutes=dom.floor_waste, no_inside=True)]
+        return _finish_contacts(out, center), area, center
+    if m in (methods[6], methods[7]):     # corte y relleno: tajada de potencia W y altura h sobre el relleno
+        hs = o.height
+        left, right = ((-W / 2, hs), (-W / 2, 0.0)), ((W / 2, hs), (W / 2, 0.0))
+        hw_left = dom.hw_side < 0
+        center = (0.0, hs / 2)
+        area = W * hs
+        out.append(dict(name="Techo de la tajada (mineral)", rock=ore, a=(-W / 2, hs), b=(W / 2, hs),
+                        color="#8c564b", dilutes=False))
+    elif m == methods[2]:
         z_lo = -o.down_h if o.fan_type != "Ascendente" else 0.0
         z_top = o.drift_h + (o.up_h if o.fan_type != "Descendente" else 0.0)
         left, right = ((-W / 2, z_top), (-W / 2, z_lo)), ((W / 2, z_top), (W / 2, z_lo))
@@ -92,6 +125,10 @@ def contacts(o, methods, dom: DomainOptions, ore: Rock):
     hw, fw = (left, right) if hw_left else (right, left)
     out = [dict(name="Caja techo", rock=dom.hw, a=hw[0], b=hw[1], color="#d62728"),
            dict(name="Caja piso", rock=dom.fw, a=fw[0], b=fw[1], color="#9467bd")] + out
+    return _finish_contacts(out, center), area, center
+
+
+def _finish_contacts(out, center, dom=None):
     for c in out:
         a, b = np.array(c["a"], float), np.array(c["b"], float)
         t = b - a
@@ -99,8 +136,9 @@ def contacts(o, methods, dom: DomainOptions, ore: Rock):
         n = np.array([-t[1], t[0]]) / Lw
         if np.dot(np.array(center) - a, n) < 0:
             n = -n
-        c.update(n=n, Lw=Lw, ppv_c=c["rock"].ppv_crit, thr=dom.n_ob * c["rock"].ppv_crit)
-    return out, area, center
+        c.setdefault("dilutes", True)
+        c.update(n=n, Lw=Lw, ppv_c=c["rock"].ppv_crit)
+    return out
 
 
 def _dist(row, c, s, o):
@@ -221,6 +259,8 @@ def apply_domains(rows, o, methods, dom: DomainOptions, ore: Rock, w_cart, lg, w
     """Analiza (y, si se pide, ajusta) los taladros de borde frente a cada contacto. Marca la columna 'borde' en
     los taladros y devuelve el resumen para vistas, memoria y PDF."""
     cons, area, center = contacts(o, methods, dom, ore)
+    for c in cons:
+        c["thr"] = dom.n_ob * c["ppv_c"]
     Ss = [r.get("S") for r in rows if r.get("S") == r.get("S") and r.get("S")]
     S_med = float(np.median(Ss)) if Ss else 1.5
     an0 = _analyze(rows, cons, o, dom, S_med)
@@ -233,7 +273,7 @@ def apply_domains(rows, o, methods, dom: DomainOptions, ore: Rock, w_cart, lg, w
     for a in an:
         for k in a["edge"]:
             rows[k]["borde"] = (rows[k]["borde"] + " · " if rows[k]["borde"] else "") + a["c"]["name"]
-    F = "2c. Macizo por dominios (mineral, cajas y techo)"
+    F = "2c. Macizo por dominios"
     lg.add(F, "Mineral: VPP crítica", "VPP_c", ore.ppv_crit, "mm/s",
            f"σt·Vp/E = {ore.st:.1f}·{ore.Vp:.0f}/{ore.E:.0f}; ρ = {ore.rho:.2f} t/m³")
     lg.add(F, "Modelo de vibración", "—", f"Holmberg–Persson K = {dom.K:.0f}, α = {dom.alpha:.2f}", "",
@@ -253,14 +293,30 @@ def apply_domains(rows, o, methods, dom: DomainOptions, ore: Rock, w_cart, lg, w
             lg.add(F, f"{c['name']}: ELOS sin ajuste", "ELOS₀", a0["elos"], "m", "")
         lg.add(F, f"{c['name']}: sobrerotura equivalente", "ELOS", a["elos"], "m",
                "promedio de (radio de sobrerotura − d_ef) en la fila de borde")
-        tw = a["elos"] * c["Lw"] * rk.rho
+        tw = a["elos"] * c["Lw"] * rk.rho if c["dilutes"] else 0.0
         t_w += tw
         tab.append([c["name"], f"{c['ppv_c']:,.0f}", f"{c['thr']:,.0f}", f"{a['dmin']:.2f}", len(a["edge"]),
-                    f"{a0['elos']:.2f}", f"{a['elos']:.2f}", f"{tw:.1f}"])
-        if a["inside"]:
+                    f"{a0['elos']:.2f}", f"{a['elos']:.2f}", f"{tw:.1f}" if c["dilutes"] else "no diluye"])
+        if not c["dilutes"]:
+            eff = ("adelgaza el pilar (ver FS)" if c["name"].startswith("Pilar") else
+                   "daño bajo la cota del piso" if c["name"].startswith("Piso") else
+                   "daño al techo de trabajo (mineral de la siguiente tajada)")
+            lg.add(F, f"{c['name']}: efecto", "—", eff, "", "es mineral: no diluye")
+        if a["inside"] and not c.get("no_inside"):
             warnings.append(f"{a['inside']} taladro(s) tienen carga dentro de la {c['name'].lower()} considerando la "
                             f"desviación: retírelos del contacto o controle la desviación.")
-        if a["elos"] > 0.5:
+        if a["elos"] > 0.5 and not c["dilutes"]:
+            if c["name"].startswith("Pilar"):
+                warnings.append(f"{c['name']}: sobrerotura estimada de {a['elos']:.2f} m: adelgaza el pilar; use voladura "
+                                f"controlada (carga reducida o desacoplada) en los taladros junto a los pilares.")
+            elif c["name"].startswith("Piso"):
+                warnings.append(f"{c['name']}: daño estimado de {a['elos']:.2f} m bajo la cota del piso: reduzca la "
+                                f"sobreperforación o la carga de fondo (modo automático).")
+            else:
+                warnings.append(f"{c['name']}: daño estimado de {a['elos']:.2f} m sobre el techo de trabajo: use taco de "
+                                f"fondo o recorte la carga en el extremo de los taladros (modo automático) y refuerce el "
+                                f"sostenimiento.")
+        elif a["elos"] > 0.5:
             warnings.append(f"{c['name']}: sobrerotura estimada de {a['elos']:.2f} m (ELOS > 0.5 m): reduzca la carga de "
                             f"los taladros de borde, aléjelos del contacto o use un diámetro menor.")
         if c["name"].startswith("Caja") and a["info"]:
@@ -280,7 +336,10 @@ def apply_domains(rows, o, methods, dom: DomainOptions, ore: Rock, w_cart, lg, w
     if n_short:
         warnings.append(f"{n_short} taladro(s) de borde no llegan al ELOS objetivo ni con la carga mínima: aléjelos del "
                         f"contacto o reduzca el diámetro.")
-    return dict(contacts=[dict(name=a["c"]["name"], a=a["c"]["a"], b=a["c"]["b"], n=list(a["c"]["n"]),
+    rp = None
+    if o.method in (methods[4], methods[5]):
+        rp = pillar_roof(o, dom, ore, an, lg, warnings)
+    return dict(rp=rp, contacts=[dict(name=a["c"]["name"], a=a["c"]["a"], b=a["c"]["b"], n=list(a["c"]["n"]),
                                color=a["c"]["color"], elos=a["elos"], elos0=a0["elos"], ppv_c=a["c"]["ppv_c"],
                                thr=a["c"]["thr"]) for a, a0 in zip(an, an0)],
                 dilution=dil, t_ore=t_ore, t_waste=t_w, grade=dom.grade, grade_dil=g_dil, unit=dom.grade_unit,
@@ -300,3 +359,65 @@ def domain_shapes(dinfo, band=2.0, kz=1.0):
             obs.append(([p[0], q[0]], [p[1] * kz, q[1] * kz], f"Sobrerotura {c['name'].lower()} ({c['elos']:.2f} m)",
                         c["color"]))
     return regs, obs
+
+
+def _lunder_pakalnis(ucs, w, h):
+    r = w / h
+    cpav = 0.46 * (math.log10(r + 0.75)) ** (1.4 / r)
+    kappa = math.tan(math.acos((1 - cpav) / (1 + cpav)))
+    return 0.44 * ucs * (0.68 + 0.52 * kappa)
+
+
+def pillar_roof(o, dom, ore, an, lg, warnings):
+    """Pilares cuadrados por área tributaria (Hedley y Grant; Lunder y Pakalnis) con el ancho efectivo tras la
+    sobrerotura, y abertura máxima del techo de Barton (2·ESR·Q^0.4) frente a la abertura real."""
+    F = "2d. Cámaras y pilares: pilares y techo"
+    el = [a["elos"] for a in an if a["c"]["name"].startswith("Pilar")]
+    elos_p = float(np.mean(el)) if el else 0.0
+    w, Wc = o.pillar, o.room
+    hp = o.height + dom.h_head
+    w_ef = max(w - 2 * elos_p, 0.1)
+    gamma = dom.rho_over * 9.81 / 1000            # MN/m³
+    sv = gamma * dom.depth
+    out = {}
+    lg.add(F, "Esfuerzo vertical in situ", "σv", sv, "MPa", f"γ·H = {gamma:.4f}·{dom.depth:.0f}")
+    lg.add(F, "Pilar: ancho de diseño / altura", "w / h", f"{w:.2f} / {hp:.2f}", "m",
+           f"altura = banco {o.height:.1f} + galería piloto {dom.h_head:.1f}")
+    lg.add(F, "Sobrerotura media en los pilares", "ELOS_p", elos_p, "m", "de los taladros junto a los pilares")
+    lg.add(F, "Ancho efectivo del pilar", "w_ef", w_ef, "m", "w − 2·ELOS_p")
+    rows = []
+    for lab, ww in (("diseño", w), ("tras la voladura", w_ef)):
+        sp = sv * ((ww + Wc + (w - ww)) / ww) ** 2      # el área tributaria no cambia; el pilar se adelgaza
+        shg = dom.K_hg * ww ** 0.5 / hp ** 0.75
+        slp = _lunder_pakalnis(ore.UCS, ww, hp)
+        rows.append((lab, ww, sp, shg, slp))
+        lg.add(F, f"Esfuerzo en el pilar ({lab})", "σp", sp, "MPa", "σv·((w + Wc)/w_ef)² (área tributaria)")
+        lg.add(F, f"Resistencia Hedley–Grant ({lab})", "σs", shg, "MPa", f"K·w^0.5/h^0.75, K = {dom.K_hg:.0f} MPa")
+        lg.add(F, f"Resistencia Lunder–Pakalnis ({lab})", "σs", slp, "MPa", f"0.44·σci·(0.68 + 0.52·κ), σci = {ore.UCS:.0f}")
+        lg.add(F, f"FS del pilar ({lab})", "FS", f"{shg / sp:.2f} (H–G) · {slp / sp:.2f} (L–P)", "", "")
+    fs_hg, fs_lp = rows[1][3] / rows[1][2], rows[1][4] / rows[1][2]
+    out["FS pilar Hedley–Grant (diseño → tras voladura)"] = f"{rows[0][3] / rows[0][2]:.2f} → {fs_hg:.2f}"
+    if fs_lp < 1.4 or fs_hg < 1.5:
+        warnings.append(f"Pilar: FS tras la voladura {fs_hg:.2f} (Hedley–Grant) / {fs_lp:.2f} (Lunder–Pakalnis) por "
+                        f"debajo de 1.5 / 1.4: use voladura controlada junto a los pilares o aumente su ancho.")
+    roof = dom.back or ore
+    wmax = 2 * dom.esr * max(roof.Q, 1e-3) ** 0.4
+    w_real = Wc + 2 * elos_p
+    lg.add(F, "Abertura máxima sin sostenimiento (Barton)", "W_máx", wmax, "m",
+           f"2·ESR·Q^0.4; ESR = {dom.esr:.1f}, Q del techo = {roof.Q:.2f}")
+    lg.add(F, "Abertura real de la cámara", "W_real", w_real, "m", "Wc + 2·ELOS_p")
+    lg.add(F, "Abertura en la intersección", "√2·W_real", math.sqrt(2) * w_real, "m", "diagonal entre pilares")
+    if w_real > wmax:
+        warnings.append(f"Techo: abertura real {w_real:.1f} m mayor que la máxima sin sostenimiento ({wmax:.1f} m, "
+                        f"Barton): instale sostenimiento sistemático o reduzca el ancho de la cámara.")
+    elif math.sqrt(2) * w_real > wmax:
+        warnings.append(f"Techo: en las intersecciones la abertura llega a {math.sqrt(2) * w_real:.1f} m (> {wmax:.1f} m): "
+                        f"refuerce el sostenimiento en los cruces.")
+    rec0 = 1 - w ** 2 / (w + Wc) ** 2
+    rec1 = 1 - w_ef ** 2 / (w + Wc) ** 2
+    lg.add(F, "Recuperación (diseño → efectiva)", "R", f"{100 * rec0:.1f} → {100 * rec1:.1f}", "%",
+           "la sobrerotura de los pilares sube la recuperación pero los debilita")
+    summ = {"Ancho efectivo del pilar (m)": w_ef, "FS pilar Hedley–Grant tras voladura": fs_hg,
+            "FS pilar Lunder–Pakalnis tras voladura": fs_lp, "Abertura real de la cámara (m)": w_real,
+            "Abertura máxima Barton (m)": wmax}
+    return dict(summary=summ, w=w, w_ef=w_ef, elos_p=elos_p, rows=rows, wmax=wmax, w_real=w_real)

@@ -77,7 +77,36 @@ def explosive_picker(label, default, cart_default, key, allow_bulk=True):
     return ex
 
 
+ROCK_MODES = ["Un solo dominio litológico", "Por dominios: mineral, caja techo y caja piso"]
+
+
+def rock_domain_inputs(prefix, d):
+    """Propiedades geomecánicas completas de un dominio (caja techo o caja piso)."""
+    c1, c2 = st.columns(2)
+    rmr = c1.number_input("RMR", 5, 100, d["RMR"], key=prefix + "rmr")
+    gsi = c2.number_input("GSI", 5, 100, d["GSI"], key=prefix + "gsi")
+    rqd = c1.number_input("RQD (%)", 1, 100, d["RQD"], key=prefix + "rqd")
+    ucs = c2.number_input("σci (MPa)", 5.0, 350.0, d["UCS"], 5.0, key=prefix + "ucs")
+    rho = c1.number_input("Densidad (t/m³)", 1.8, 4.5, d["rho"], 0.01, key=prefix + "rho")
+    q = c2.number_input("Q de Barton", 0.001, 1000.0, d["Q"], key=prefix + "q")
+    e = c1.number_input("E (GPa)", 1.0, 120.0, d["E"], key=prefix + "e")
+    stt = c2.number_input("σt tracción (MPa)", 0.3, 40.0, round(ucs / 10, 1), 0.1, key=prefix + "st")
+    vp = c1.number_input("Vp (m/s; 0 = con Q)", 0.0, 7000.0, 0.0, 50.0, key=prefix + "vp")
+    jsf = 1.0 if rmr > 60 else 0.9 if rmr > 40 else 0.8 if rmr > 20 else 0.7
+    r = Rock(RMR=rmr, GSI=gsi, RQD=rqd, UCS=ucs, rho=rho, Q=q, JSF=jsf, E=e, sigma_t=stt, Vp_user=vp or None)
+    c2.metric("VPP crítica", f"{r.ppv_crit:,.0f} mm/s")
+    return r
+
+
 with st.sidebar.expander("Macizo rocoso", expanded=False):
+    rock_mode = st.radio("Modelo del macizo", ROCK_MODES, key="rock_mode",
+                         help="Un solo dominio: todo el diseño usa las mismas propiedades (cuerpos masivos, irregulares "
+                              "o sin datos de las cajas). Por dominios: el mineral, la caja techo y la caja piso tienen "
+                              "propiedades propias y cada método usa la que le corresponde (cuerpos tabulares: vetas, "
+                              "mantos).")
+    multi = rock_mode == ROCK_MODES[1]
+    if multi:
+        st.markdown("**Mineral**")
     c1, c2 = st.columns(2)
     RMR = c1.number_input("RMR", 5, 100, 50)
     GSI = c2.number_input("GSI", 5, 100, 45)
@@ -92,8 +121,24 @@ with st.sidebar.expander("Macizo rocoso", expanded=False):
                             help="Por defecto σci/10. Se usa en Torbica y Lapcevic, Pearse del curso y la VPP crítica.")
     nu = c2.number_input("Poisson ν", 0.05, 0.45, 0.25, 0.01)
     vp_m = st.number_input("Vp medida (m/s; 0 = estimar con Q)", 0.0, 7000.0, 0.0, 50.0)
-rock = Rock(RMR=RMR, GSI=GSI, RQD=RQD, UCS=UCS, rho=rho_r, Q=Qb, JSF=JSF, E=Emod, sigma_t=sig_t, nu=nu,
-            Vp_user=vp_m or None)
+    ore = Rock(RMR=RMR, GSI=GSI, RQD=RQD, UCS=UCS, rho=rho_r, Q=Qb, JSF=JSF, E=Emod, sigma_t=sig_t, nu=nu,
+               Vp_user=vp_m or None)
+    hw_rock = fw_rock = None
+    rock_where = "Mineral"
+    if multi:
+        st.caption(f"VPP crítica del mineral: {ore.ppv_crit:,.0f} mm/s")
+        st.markdown("**Caja techo**")
+        hw_rock = rock_domain_inputs("hw_", dict(RMR=40, GSI=35, RQD=40, UCS=45.0, rho=2.70, Q=0.6, E=20.0))
+        st.markdown("**Caja piso**")
+        fw_rock = rock_domain_inputs("fw_", dict(RMR=55, GSI=50, RQD=65, UCS=80.0, rho=2.70, Q=3.0, E=35.0))
+        if labor != "Producción":
+            rock_where = st.selectbox("La labor se excava en", ["Mineral", "Caja techo", "Caja piso"], key="rock_where",
+                                      help="Avances, chimeneas y piques usan las propiedades del dominio donde se "
+                                           "excavan (p. ej., una rampa o un by-pass en la caja piso).")
+        else:
+            st.caption("Producción: el burden y la carga se diseñan con el mineral; las cajas se usan para la "
+                       "sobrerotura, la dilución y la estabilidad (pilares, techo).")
+rock = {"Mineral": ore, "Caja techo": hw_rock, "Caja piso": fw_rock}[rock_where] or ore
 
 with st.sidebar.expander("Iniciación", expanded=False):
     system = st.selectbox("Sistema de iniciación", sq.SYSTEMS, index=2 if labor != "Producción" else 4)
@@ -459,11 +504,13 @@ try:
                         ody = c1.number_input("Desplazamiento lateral (m)", -10.0, 10.0, 0.0, 0.1, key="oth_dy")
                         po.other = DrillSetup(kind=ok_, width=ow, height=oh, radius=orr, top_w=otw, drift_y=ody)
                     st.caption("Una sola labor de perforación por nivel; el carrusel gira con el 'dip' de cada taladro.")
-            if method in PROD_METHODS[:4]:
+            if method == PROD_METHODS[3]:
+                po.slot_on = False          # VCR: la cara libre es el corte inferior (undercut), sin chimenea slot
+            if method in PROD_METHODS[:3]:
                 with st.sidebar.expander("Chimenea slot (cara libre inicial)", expanded=False):
-                    po.slot_on = st.checkbox("Incluir chimenea slot", method != PROD_METHODS[3], key=f"so{method[:6]}",
+                    po.slot_on = st.checkbox("Incluir chimenea slot", True, key=f"so{method[:6]}",
                                              help="En taladros largos la producción arranca hacia una chimenea slot "
-                                                  "ensanchada de caja a caja; el VCR usa el corte inferior como cara libre.")
+                                                  "ensanchada de caja a caja.")
                     if po.slot_on:
                         so = SlotOptions(widen=True)
                         so.kind = st.selectbox("Sección", VERTICAL_TYPES, index=0, key="ps_kind")
@@ -493,38 +540,56 @@ try:
                         st.caption("La chimenea se perfora con la misma inclinación de los taladros paralelos y su ensanche "
                                    "abarca todo el ancho del tajeo; la primera fila de producción sale hacia ella con el "
                                    "burden y espaciamiento de producción.")
-            if method in PROD_METHODS[:4]:
-                with st.sidebar.expander("Macizo por dominios (cajas y techo)", expanded=False):
+            if method in PROD_METHODS[:8] and multi:
+                rp_m = method in (PROD_METHODS[4], PROD_METHODS[5])
+                with st.sidebar.expander("Sobrerotura y estabilidad por dominios (pilares, techo y piso)" if rp_m else
+                                         "Sobrerotura y dilución por dominios (cajas)", expanded=False):
                     dmo = DomainOptions()
-                    dmo.on = st.checkbox("Evaluar caja techo, caja piso y techo", True, key="dm_on",
-                                         help="El apartado 'Macizo rocoso' es el MINERAL. Aquí se definen las cajas para "
-                                              "estimar la sobrerotura (ELOS) y la dilución.")
+                    dmo.on = st.checkbox("Evaluar sobrerotura, dilución y estabilidad", True, key="dm_on",
+                                         help="Usa el mineral, la caja techo y la caja piso del apartado Macizo rocoso.")
                     if dmo.on:
-                        st.caption(f"Mineral (apartado Macizo rocoso): VPP crítica = {rock.ppv_crit:,.0f} mm/s")
+                        st.caption(f"Rocas del apartado Macizo rocoso — VPP crítica: mineral {ore.ppv_crit:,.0f}, caja "
+                                   f"techo {hw_rock.ppv_crit:,.0f}, caja piso {fw_rock.ppv_crit:,.0f} mm/s")
                         inclined = method in (PROD_METHODS[0], PROD_METHODS[1]) and po.dip_deg < 90
-                        if inclined:
+                        if rp_m:
+                            st.caption("Cámaras y pilares: los pilares son mineral (apartado Macizo rocoso); se evalúan "
+                                       "su ancho efectivo y su FS, el techo (abertura de Barton) y el piso.")
+                        elif inclined:
                             st.caption("Con taladros inclinados, la caja techo es la pared que queda sobre el mineral "
                                        "(lado hacia el que buza la veta).")
                         else:
                             dmo.hw_side = -1.0 if st.radio("Caja techo al lado", ["−y (izquierda)", "+y (derecha)"],
                                                            horizontal=True, key="dm_side").startswith("−") else 1.0
 
-                        def rock_in(lbl, key, d):
-                            st.markdown(f"**{lbl}**")
-                            c1, c2, c3 = st.columns(3)
-                            sti = c1.number_input("σt (MPa)", 0.3, 40.0, d[0], 0.1, key=key + "st")
-                            Ei = c2.number_input("E (GPa)", 1.0, 120.0, d[1], 1.0, key=key + "E")
-                            rhoi = c3.number_input("ρ (t/m³)", 1.5, 4.5, d[2], 0.01, key=key + "rho")
-                            Qi = c1.number_input("Q", 0.001, 1000.0, d[3], key=key + "Q")
-                            vpi = c2.number_input("Vp (m/s, 0 = Q)", 0.0, 7000.0, 0.0, 50.0, key=key + "vp")
-                            ri = Rock(UCS=10 * sti, rho=rhoi, Q=Qi, E=Ei, sigma_t=sti, Vp_user=vpi or None)
-                            c3.metric("VPP crít.", f"{ri.ppv_crit:,.0f}")
-                            return ri
-
-                        dmo.hw = rock_in("Caja techo", "dmh", (4.0, 20.0, 2.70, 0.6))
-                        dmo.fw = rock_in("Caja piso", "dmf", (7.0, 35.0, 2.70, 3.0))
+                        dmo.hw, dmo.fw = hw_rock, fw_rock
+                        if rp_m:
+                            st.caption("Manto: el techo es la caja techo y el piso es la caja piso.")
+                            c1, c2 = st.columns(2)
+                            roof_is = c1.selectbox("Techo", ["Caja techo (estéril)", "Mineral"], key="dm_rw")
+                            floor_is = c2.selectbox("Piso", ["Mineral", "Caja piso (estéril)"], key="dm_fw")
+                            dmo.roof_waste = roof_is.startswith("Caja")
+                            dmo.floor_waste = floor_is.startswith("Caja")
+                            dmo.back = hw_rock if dmo.roof_waste else None
+                            dmo.floor = fw_rock if dmo.floor_waste else None
+                            st.markdown("**Pilares y techo**")
+                            c1, c2 = st.columns(2)
+                            if method == PROD_METHODS[5]:
+                                po.pillar = c1.number_input("Lado del pilar (m)", 2.0, 30.0, 6.0, 0.5, key="dm_pw")
+                            dmo.depth = c2.number_input("Profundidad (m)", 10.0, 2500.0, 200.0, 10.0, key="dm_H")
+                            dmo.h_head = c1.number_input("Altura de la galería piloto (m)", 0.0, 10.0, 4.0, 0.1,
+                                                         key="dm_hh", help="El techo queda a banco + galería piloto; "
+                                                                           "la altura del pilar es la suma de ambas.")
+                            dmo.rho_over = c2.number_input("ρ recubrimiento (t/m³)", 1.8, 4.0, 2.7, 0.05, key="dm_ro")
+                            dmo.esr = c1.number_input("ESR (Barton)", 0.8, 5.0, 3.0, 0.1, key="dm_esr",
+                                                      help="Labores mineras temporales: 3–5; permanentes: 1.6.")
+                            dmo.K_hg = c2.number_input("K Hedley–Grant (MPa)", 20.0, 300.0, 133.0, 1.0, key="dm_khg")
                         if method == PROD_METHODS[2] and po.fan_type != "Descendente":
-                            dmo.back = rock_in("Techo / corona", "dmb", (5.0, 25.0, 2.70, 1.0))
+                            bk = st.selectbox("Techo / corona sobre los abanicos", ["Mineral", "Caja techo"], key="dm_bk")
+                            dmo.back = ore if bk == "Mineral" else hw_rock
+                        if method in (PROD_METHODS[6], PROD_METHODS[7]):
+                            st.caption("Corte y relleno: el techo de la tajada es mineral (apartado Macizo rocoso) y el "
+                                       "piso es relleno. El daño al techo no diluye, pero afecta la seguridad del "
+                                       "frente; las cajas sí diluyen.")
                         st.markdown("**Vibración y sobrerotura**")
                         c1, c2, c3 = st.columns(3)
                         dmo.K = c1.number_input("K (H–P)", 50.0, 2000.0, 700.0, 10.0, key="dm_K")
@@ -576,14 +641,21 @@ try:
                           ("Geometría (largo · ancho · alto)", f"{po.length:.1f} · {po.width:.1f} · {po.height:.1f} m"),
                           ("Explosivo", pexp.label()), ("Filas por voladura", po.rows_blast),
                           ("Desviación · emboquille", f"{po.alpha * 100:.1f} % · {po.e_coll:.2f} m")]
+            if multi:
+                pdf_params.append(("Caja techo (RMR · σci · VPP crít.)",
+                                   f"{hw_rock.RMR} · {hw_rock.UCS:.0f} MPa · {hw_rock.ppv_crit:,.0f} mm/s"))
+                pdf_params.append(("Caja piso (RMR · σci · VPP crít.)",
+                                   f"{fw_rock.RMR} · {fw_rock.UCS:.0f} MPa · {fw_rock.ppv_crit:,.0f} mm/s"))
             if method in (PROD_METHODS[0], PROD_METHODS[1]):
                 pdf_params.append(("Taladros paralelos", f"{po.dip_deg:.0f}° · " + ("pasantes" if po.breakthrough
                                    else f"ciegos (puente {po.toe_gap:.1f} m)")))
             if method == PROD_METHODS[2]:
                 pdf_params.append(("Inclinación del anillo", f"{po.ring_dip:.0f}°"))
-            if method in PROD_METHODS[:4]:
+            if method in PROD_METHODS[:3]:
                 pdf_params.append(("Chimenea slot", "sí — " + (po.slot.direction if po.slot else "")
-                                   if po.slot_on else "no (cara libre por corte inferior)"))
+                                   if po.slot_on else "no"))
+            if method == PROD_METHODS[3]:
+                pdf_params.append(("Cara libre", "corte inferior (undercut), sin chimenea slot"))
 except Exception as e:  # noqa: BLE001
     err = e
 
@@ -785,8 +857,8 @@ with tabs[1]:
                 scale = {"cm": 1.0, "mm": 0.1, "m": 100.0}[unit]
                 n_u = c3.number_input("n (si predice X50)", 0.5, 3.0, 1.5, 0.05)
                 st.caption(f"Use un modelo entrenado con datos de **{labor.lower()}**: no mezcle avance y producción.")
-                base_vals = dict(d_mm=fp["d_mm"], q=fp["q"], H=fp["H"], Lc=fp["Lc"], Lt=fp["H"] - fp["Lc"], RMR=RMR,
-                                 GSI=GSI, RQD=RQD, UCS=UCS, rho_r=rho_r, VOD=main_exp.vod, rho_e=main_exp.rho,
+                base_vals = dict(d_mm=fp["d_mm"], q=fp["q"], H=fp["H"], Lc=fp["Lc"], Lt=fp["H"] - fp["Lc"], RMR=rock.RMR,
+                                 GSI=rock.GSI, RQD=rock.RQD, UCS=rock.UCS, rho_r=rock.rho, VOD=main_exp.vod, rho_e=main_exp.rho,
                                  RWS=main_exp.rws * 100, A_sec=S.get("Área de la sección (m²)", 0.0))
                 names = fr.model_feature_names(model)
                 if names and [f for f in names if f not in fr.ML_VARIABLES]:
@@ -978,7 +1050,7 @@ with tabs[5]:
             st.caption(f"Q máx = {qmax:.1f} kg")
         link = st.slider("Radio de alivio (× B)", 1.2, 3.0, 1.6, 0.1)
     with c3:
-        cfg = dict(ms_m=ms_por_metro(RMR))
+        cfg = dict(ms_m=ms_por_metro(rock.RMR))
         carpio_gap = False
         if system.startswith("Carmex"):
             cfg.update(burn=st.number_input("Combustión de la mecha (s/m)", 80.0, 250.0, 150.0, 5.0),
@@ -1009,7 +1081,7 @@ with tabs[5]:
             opt = dict(classic=classic, qmax=qmax, nmax=int(nmax), cut_single=cut_single, method=meth, time_limit=tl,
                        link=link, carpio_gap=carpio_gap, simultaneous=res.simultaneous if sim_on else set())
             with st.spinner("Calculando…"):
-                seq, info = sq.run_sequencing(H, res.sources, opt, system, cfg, RMR)
+                seq, info = sq.run_sequencing(H, res.sources, opt, system, cfg, rock.RMR)
             ss.seq, ss.seq_sig, ss.seq_info, ss.seq_qmax = seq, sig, info, qmax
             st.rerun()
     if ss.seq is not None:
@@ -1109,12 +1181,15 @@ with tabs[6]:
                 opt_d = dict(classic=classic, qmax=max(float(qmax), float(q_unit.max()) + 1e-6), nmax=int(nmax),
                              cut_single=cut_single, method="Por filas" if prod else "Heurística", time_limit=tl,
                              link=link, carpio_gap=carpio_gap, simultaneous=res.simultaneous if sim_on else set())
-                seq_pdf, _ = sq.run_sequencing(H, res.sources, opt_d, system, cfg, RMR)
+                seq_pdf, _ = sq.run_sequencing(H, res.sources, opt_d, system, cfg, rock.RMR)
             except Exception:  # noqa: BLE001
                 seq_pdf = None
         with st.spinner("Generando el PDF…"):
-            pdf = report.build_pdf(res, info, pdf_params + [("Macizo (RMR · RQD · σci · ρ)",
-                                                             f"{RMR} · {RQD} % · {UCS:.0f} MPa · {rho_r:.2f} t/m³"),
+            pdf = report.build_pdf(res, info, pdf_params + [("Modelo del macizo", rock_mode + ("" if not multi else
+                                                                               f" — labor en: {rock_where}")),
+                                                            ("Macizo de diseño (RMR · RQD · σci · ρ)",
+                                                             f"{rock.RMR} · {rock.RQD} % · {rock.UCS:.0f} MPa · "
+                                                             f"{rock.rho:.2f} t/m³"),
                                                             ("Iniciación", system)],
                                    seq=seq_pdf if inc_s else None,
                                    energy=el if (inc_e and el and el.get("sig") == sig) else None, system=system)
