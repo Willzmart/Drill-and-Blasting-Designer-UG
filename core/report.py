@@ -70,6 +70,18 @@ def _dim(ax, p0, p1, off, text, horizontal=True, color="#1f3b73", fs=8):
                 rotation=90, bbox=dict(fc="white", ec="none", pad=0.6))
 
 
+def _mpl_domains(ax, regs, obs, pts=None):
+    for xs, ys, name, col in regs:
+        a = np.c_[xs, ys]
+        ax.add_patch(MplPolygon(a, closed=True, fc=col, alpha=0.12, ec=col, lw=1.0, zorder=1.5))
+        ax.text(a[:-1, 0].mean(), a[:-1, 1].mean(), name, fontsize=6.5, color=col, ha="center", va="center",
+                zorder=7, rotation=90 if np.ptp(a[:, 1]) > 2.5 * np.ptp(a[:, 0]) else 0)
+        if pts is not None:
+            pts.append(a)
+    for xs, ys, name, col in obs:
+        ax.plot(xs, ys, ls="--", lw=1.1, color=col, zorder=3, label=name)
+
+
 def design_drawing(res, title, max_label=400):
     """Plano 2D acotado de la malla. Devuelve PNG (bytes) y el factor de escala aproximado."""
     v = res.view2d
@@ -84,6 +96,7 @@ def design_drawing(res, title, max_label=400):
         pts.append(out)
     for xs, ys in v.get("lines", []):
         ax.plot(xs, ys, color="#888888", lw=0.6, zorder=2)
+    _mpl_domains(ax, v.get("domain_regions", []), v.get("domain_lines", []), pts)
     d = v.get("drill")
     if d:
         a = np.asarray(d["drift"])
@@ -630,6 +643,9 @@ def section_drawing(res):
         a = np.asarray(dco)
         ax.add_patch(MplPolygon(a, closed=True, fc="#dbe9f6", ec="#1f77b4", lw=1.1))
         allp.append(a)
+    if res.p.get("domains"):
+        from .domains import domain_shapes
+        _mpl_domains(ax, *domain_shapes(res.p["domains"], band=max(1.0, 0.12 * float(np.ptp(st[:, 0])))), allp)
     for oco in sv.get("others", []):
         a = np.asarray(oco)
         ax.add_patch(MplPolygon(a, closed=True, fc="#dff2df", ec="#2ca02c", lw=1.1))
@@ -854,6 +870,22 @@ def build_pdf(res, info: dict, params: list, seq=None, energy=None, system="") -
     t = Table(data, colWidths=[60 * mm, 28 * mm, 28 * mm, 28 * mm, 32 * mm], repeatRows=1)
     t.setStyle(_grid_style(total=True))
     story += [Spacer(1, 5 * mm), Paragraph("Distribución por zona", st_h), t]
+    dm = res.p.get("domains")
+    if dm:
+        st_th = ParagraphStyle("th", parent=st_n, fontName=_FONT_B, fontSize=7, leading=8, textColor=colors.white)
+        data = [[Paragraph(x, st_th) for x in ("Contacto", "VPP crítica (mm/s)", "Umbral de sobrerotura (mm/s)",
+                                               "Distancia mín. de la carga (m)", "Taladros de borde",
+                                               "ELOS sin ajuste (m)", "ELOS final (m)", "Estéril (t/m)")]] + \
+               [[str(c) for c in r] for r in dm["table"]]
+        data.append(["Mineral", f"{dm['ore_ppv']:,.0f}", f"{dm['n_ob'] * dm['ore_ppv']:,.0f}", "", "", "", "",
+                     f"{dm['t_ore']:.1f}"])
+        t = Table(data, colWidths=[30 * mm, 28 * mm, 34 * mm, 26 * mm, 26 * mm, 28 * mm, 20 * mm, 24 * mm], repeatRows=1)
+        t.setStyle(_grid_style())
+        txt = (f"Dilución estimada: {100 * dm['dilution']:.1f} % (estéril / (mineral + estéril), por metro de corrida)."
+               + (f" Ley diluida: {dm['grade_dil']:.3f} {dm['unit']} (in situ {dm['grade']:.3f})." if dm.get("grade_dil")
+                  is not None else ""))
+        story.append(KeepTogether([Spacer(1, 4 * mm), Paragraph("Macizo por dominios: sobrerotura y dilución", st_h),
+                                   t, Spacer(1, 1.5 * mm), Paragraph(txt, st_n)]))
     if res.warnings:
         story.append(Spacer(1, 3 * mm))
         story.append(Paragraph("Advertencias: " + " · ".join(dict.fromkeys(res.warnings)), st_s))

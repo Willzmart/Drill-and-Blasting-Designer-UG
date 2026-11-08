@@ -27,6 +27,7 @@ from core.avance import CHARGE_METHODS, DESIGNS, AvanceOptions, Drill, run_avanc
 from core.common import (CARTRIDGES, EXPLOSIVES, EXSANEL_LP, EXSANEL_MS, FANEL_MS, KONYA_EQS, KONYA_KD, KONYA_KR,
                          KONYA_KS, P80_REFERENCIAS, Rock, make_explosive, ms_por_metro)
 from core.cuts import CUT_NOTES, CUT_TYPES
+from core.domains import EDGE_MODES, GRADE_UNITS, DomainOptions
 from core.drilling import DrillSetup
 from core.slot import SLOT_BLAST, SLOT_CUTS, SLOT_DIR, SlotOptions, run_slot
 
@@ -492,6 +493,55 @@ try:
                         st.caption("La chimenea se perfora con la misma inclinación de los taladros paralelos y su ensanche "
                                    "abarca todo el ancho del tajeo; la primera fila de producción sale hacia ella con el "
                                    "burden y espaciamiento de producción.")
+            if method in PROD_METHODS[:4]:
+                with st.sidebar.expander("Macizo por dominios (cajas y techo)", expanded=False):
+                    dmo = DomainOptions()
+                    dmo.on = st.checkbox("Evaluar caja techo, caja piso y techo", True, key="dm_on",
+                                         help="El apartado 'Macizo rocoso' es el MINERAL. Aquí se definen las cajas para "
+                                              "estimar la sobrerotura (ELOS) y la dilución.")
+                    if dmo.on:
+                        st.caption(f"Mineral (apartado Macizo rocoso): VPP crítica = {rock.ppv_crit:,.0f} mm/s")
+                        inclined = method in (PROD_METHODS[0], PROD_METHODS[1]) and po.dip_deg < 90
+                        if inclined:
+                            st.caption("Con taladros inclinados, la caja techo es la pared que queda sobre el mineral "
+                                       "(lado hacia el que buza la veta).")
+                        else:
+                            dmo.hw_side = -1.0 if st.radio("Caja techo al lado", ["−y (izquierda)", "+y (derecha)"],
+                                                           horizontal=True, key="dm_side").startswith("−") else 1.0
+
+                        def rock_in(lbl, key, d):
+                            st.markdown(f"**{lbl}**")
+                            c1, c2, c3 = st.columns(3)
+                            sti = c1.number_input("σt (MPa)", 0.3, 40.0, d[0], 0.1, key=key + "st")
+                            Ei = c2.number_input("E (GPa)", 1.0, 120.0, d[1], 1.0, key=key + "E")
+                            rhoi = c3.number_input("ρ (t/m³)", 1.5, 4.5, d[2], 0.01, key=key + "rho")
+                            Qi = c1.number_input("Q", 0.001, 1000.0, d[3], key=key + "Q")
+                            vpi = c2.number_input("Vp (m/s, 0 = Q)", 0.0, 7000.0, 0.0, 50.0, key=key + "vp")
+                            ri = Rock(UCS=10 * sti, rho=rhoi, Q=Qi, E=Ei, sigma_t=sti, Vp_user=vpi or None)
+                            c3.metric("VPP crít.", f"{ri.ppv_crit:,.0f}")
+                            return ri
+
+                        dmo.hw = rock_in("Caja techo", "dmh", (4.0, 20.0, 2.70, 0.6))
+                        dmo.fw = rock_in("Caja piso", "dmf", (7.0, 35.0, 2.70, 3.0))
+                        if method == PROD_METHODS[2] and po.fan_type != "Descendente":
+                            dmo.back = rock_in("Techo / corona", "dmb", (5.0, 25.0, 2.70, 1.0))
+                        st.markdown("**Vibración y sobrerotura**")
+                        c1, c2, c3 = st.columns(3)
+                        dmo.K = c1.number_input("K (H–P)", 50.0, 2000.0, 700.0, 10.0, key="dm_K")
+                        dmo.alpha = c2.number_input("α (H–P)", 0.3, 1.5, 0.7, 0.01, key="dm_a")
+                        dmo.n_ob = c3.number_input("n × VPP crít.", 1.0, 8.0, 4.0, 0.5, key="dm_n",
+                                                   help="Umbral de sobrerotura = n × VPP crítica de la caja (curso: 4).")
+                        dmo.edge_mode = st.selectbox("Taladros de borde", EDGE_MODES, key="dm_em")
+                        if dmo.edge_mode == EDGE_MODES[1]:
+                            dmo.edge_factor = st.slider("Factor de carga en el borde", 0.15, 1.0, 0.6, 0.05, key="dm_f")
+                        elif dmo.edge_mode == EDGE_MODES[2]:
+                            dmo.elos_target = st.number_input("ELOS objetivo (m)", 0.0, 3.0, 0.3, 0.05, key="dm_t")
+                        c1, c2 = st.columns(2)
+                        dmo.grade = c1.number_input("Ley in situ del mineral", 0.0, 1000.0, 0.0, 0.1, key="dm_g")
+                        dmo.grade_unit = c2.selectbox("Unidad", GRADE_UNITS, key="dm_gu")
+                        st.caption("K y α de Holmberg–Persson son propios de cada sitio: calíbrelos con monitoreo de "
+                                   "vibraciones para que el ELOS estimado sea confiable.")
+                    po.domains = dmo
             with st.sidebar.expander("Parámetros del esquema", expanded=False):
                 c1, c2 = st.columns(2)
                 fdef = {PROD_METHODS[5]: 1.45, PROD_METHODS[6]: 0.85, PROD_METHODS[7]: 1.20}.get(method, 1.0)
@@ -846,6 +896,8 @@ with tabs[4]:
         brk = cc[3].number_input("Umbral de rotura (mm/s)", 100.0, 20000.0, float(round(4 * ppvc, -1)), 50.0,
                                  help="Plantilla del curso: ≈ 4 × VPP crítica.")
         thr = [(ppvc, "Inicio de daño", "#1f3b73"), (brk, "Rotura", "#2ca02c")]
+        for c in (res.p.get("domains") or {}).get("contacts", []):
+            thr.append((c["thr"], f"Sobrerotura en {c['name'].lower()}", c["color"]))
         unit, title = "mm/s", "PPV de Holmberg–Persson (envolvente)"
     else:
         unit = {"Concentración de explosivo (kg/t)": "kg/t", "Concentración de energía (MJ/t)": "MJ/t",
@@ -878,7 +930,7 @@ with tabs[4]:
                           outline=res.view2d.get("outline") if frame["axes"] == view_ax else None, sig=sig)
     within = (F >= thr[0][0]).mean() * 100
     if field.startswith("PPV"):
-        st.caption(f"{within:.0f} % del plano supera la VPP crítica y {(F >= thr[-1][0]).mean() * 100:.0f} % el umbral "
+        st.caption(f"{within:.0f} % del plano supera la VPP crítica y {(F >= thr[min(1, len(thr) - 1)][0]).mean() * 100:.0f} % el umbral "
                    "de rotura. Se grafica la envolvente de la PPV de cada taladro (salen en retardos distintos). Calibre "
                    "K y α con monitoreos de campo cercano.")
     else:
@@ -897,7 +949,7 @@ with tabs[4]:
                   else en.kleine(PV, seg, rock.rho, energy=(unit == "MJ/t")) * (rock.rho if unit == "kg/m³" else 1.0))
             ss.emem[ikey] = (X, Y, Z, FV)
         X, Y, Z, FV = ss.emem[ikey]
-        iso = (X, Y, Z, FV, thr[-1][0], unit)
+        iso = (X, Y, Z, FV, thr[min(1, len(thr) - 1)][0], unit)
     st.plotly_chart(ve.energy_3d(res, seg, iso, c2.checkbox("Contorno de la labor", True)), width="stretch")
 
 # =============================================================================

@@ -31,6 +31,7 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
     for xs, ys in v.get("lines", []):
         fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color="#888", width=1), showlegend=False,
                                  hoverinfo="skip"))
+    _domain_traces(fig, v.get("domain_regions", []), v.get("domain_lines", []))
     _drill_overlay(fig, v.get("drill"))
     if show_openings:
         for name, coords in v.get("openings", []):
@@ -87,6 +88,21 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
     fig.update_layout(height=height, plot_bgcolor="white", margin=dict(l=10, r=10, t=40, b=10), title=ttl,
                       legend=dict(x=1.02, y=1))
     return fig
+
+
+def _hex_rgba(c, a):
+    c = c.lstrip("#")
+    return f"rgba({int(c[0:2], 16)},{int(c[2:4], 16)},{int(c[4:6], 16)},{a})"
+
+
+def _domain_traces(fig, regs, obs):
+    """Cajas (franjas sombreadas) y líneas de sobrerotura estimada (ELOS)."""
+    for xs, ys, name, col in regs:
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", fill="toself", fillcolor=_hex_rgba(col, 0.13),
+                                 line=dict(color=col, width=1.5), name=name, hoverinfo="name"))
+    for xs, ys, name, col in obs:
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", line=dict(color=col, width=2, dash="dash"), name=name,
+                                 hoverinfo="name"))
 
 
 def _drill_overlay(fig, d):
@@ -168,6 +184,9 @@ def section_view(res, height=620):
     x, y = _xy(sv["stope"])
     fig.add_trace(go.Scatter(x=x, y=y, mode="lines", fill="toself", fillcolor=ROCK_FILL, line=dict(color="#333", width=2),
                              name="Tajeo", hoverinfo="skip"))
+    if res.p.get("domains"):
+        from .domains import domain_shapes
+        _domain_traces(fig, *domain_shapes(res.p["domains"], band=max(1.0, 0.12 * float(np.ptp(np.asarray(sv["stope"])[:, 0])))))
     _drill_overlay(fig, dict(drift=sv["drifts"], carousels=sv["carousels"], others=sv.get("others", [])))
     for ok in (True, False):
         xs, ys = [], []

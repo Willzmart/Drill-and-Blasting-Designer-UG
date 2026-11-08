@@ -108,6 +108,20 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Macizo por dominios: caja techo, caja piso y techo (producción con taladros largos)
+- El apartado *Macizo rocoso* es el **mineral**. En el expander *Macizo por dominios* se ingresan la caja techo, la
+  caja piso y, en abanicos ascendentes, el techo / corona (σt, E, ρ, Q o Vp) con su VPP crítica σt·Vp/E.
+- Con Holmberg–Persson (K, α del sitio) se calcula el radio de sobrerotura de cada taladro de borde en la caja
+  (umbral = n × VPP crítica, n = 4 por defecto) y su distancia efectiva al contacto (− emboquille − desviación·s).
+  ELOS de cada pared = promedio en la fila de borde; dilución = estéril / (mineral + estéril) por metro de corrida;
+  ley diluida = ley · (1 − D).
+- Taladros de borde: sin ajuste, factor manual o **automático** (ELOS objetivo): baja la carga lineal en taladros
+  paralelos al contacto o recorta la carga del extremo que llega al contacto en abanicos.
+- Se dibujan las cajas y las líneas de sobrerotura en la planta / anillo, en la sección y en el PDF (con tabla de
+  dominios). En Energía (PPV) aparecen los umbrales de sobrerotura de cada caja. Avisos: carga dentro de la caja,
+  ELOS > 0.5 m y riesgo de subrotura (mineral pegado).
+- En tresbolillo ya no se coloca un taladro sobre el contacto (fila desplazada a menos de S/4 de la caja).
+
 ### Vista 3D a escala real, galerías de cada nivel y nuevas láminas del PDF
 - **Vista 3D (y 3D de energía) con la misma escala en X, Y y Z**: ya no se comprimen los ejes; el diseño se ve en
   sus proporciones reales.

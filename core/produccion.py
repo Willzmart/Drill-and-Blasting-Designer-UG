@@ -13,6 +13,7 @@ from shapely.geometry import LineString, Point, Polygon
 
 from shapely import affinity
 from .drilling import DrillSetup, carousel, collar_from_pivot, drift_centers, drift_polygon, feed_angle, rig_fits
+from .domains import DomainOptions, apply_domains
 from .slot import SlotOptions, place_slot, run_slot
 from .common import (KONYA_EQS, Explosive, Result, Rock, ash_burden, b_pearse_kv, bmax_holmberg, bmax_langefors,
                      colors_for, finalize_holes, konya_burden, konya_spacing, new_hole, pearse_course_burden,
@@ -125,6 +126,7 @@ class ProdOptions:
     slot: SlotOptions | None = None
     other_on: bool = True         # dibujar la galería del otro nivel (inferior o superior)
     other: DrillSetup | None = None  # sección de esa galería (kind, ancho, alto, drift_y = desplazamiento lateral)
+    domains: DomainOptions | None = None  # macizo por dominios: caja techo, caja piso y techo
     rod_ft: float = 5.0           # longitud de barra
 
 
@@ -308,7 +310,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
             shift = (S / 2 if (o.staggered and i % 2 and nrow_y > 1) else 0.0)
             for y in ys:
                 yy = y + shift
-                if abs(yy) > o.width / 2 + 1e-6:
+                if abs(yy) > o.width / 2 - (0.25 * S if shift else 0.0) + 1e-6:   # tresbolillo: no sobre el contacto
                     continue
                 cargas, tacos, T, Lch = charge_column(L, B, bottom=False, plug=0.3 if o.breakthrough else 0.0,
                                                       decks=True)
@@ -332,6 +334,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         z_lo, z_hi = (-o.down_h if o.fan_type != "Ascendente" else 0.0), (o.up_h if o.fan_type != "Descendente" else 0.0)
         beta = math.radians(90.0 - o.ring_dip)
         kz = 1 / max(math.cos(beta), 0.2)          # escala vertical en el plano inclinado del anillo
+        res.p["kz_ring"] = kz
         drift = affinity.scale(drift_polygon(ds), 1.0, kz, origin=(0, 0))
         dp = (ds.pivot_y, ds.pivot_h * kz)
         ring = Polygon([(-AV / 2, z_lo * kz), (AV / 2, z_lo * kz), (AV / 2, (o.drift_h + z_hi) * kz),
@@ -602,6 +605,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     slot_rel = None
     if o.slot_on and m in PROD_METHODS[:4] and rows:
         slot_rel, order = _add_slot(res, rock, ex, o, rows, order, scene, lg, outline, lines2d)
+    if o.domains is not None and o.domains.on and m in PROD_METHODS[:4] and rows:
+        res.p["domains"] = apply_domains(rows, o, PROD_METHODS, o.domains, rock, ex.w_cart, lg, res.warnings)
     res.holes = finalize_holes(rows, order)
     Lmax = float(res.holes.L.max()) if len(res.holes) else 0.0
     if m in PROD_METHODS[:3] and len(res.holes):
@@ -654,6 +659,8 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     res.scene3d = scene
     if P.get("drill2d"):
         res.view2d["drill"] = P["drill2d"]
+    if res.p.get("domains"):
+        _domain_view(res, o, outline)
     if m in (PROD_METHODS[0], PROD_METHODS[1], PROD_METHODS[3]) and len(res.holes):
         _parallel_drilling(res, o, scene, lg)
     P["vol"] = vol
@@ -677,6 +684,15 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         res.summary["Chimenea slot: explosivo (kg)"] = sl["kg"]
         res.summary["Chimenea slot: taladros cargados"] = sl["n"]
         res.summary["Chimenea slot: perforación (m)"] = sl["drill"]
+    if res.p.get("domains"):
+        dm = res.p["domains"]
+        for c in dm["contacts"]:
+            res.summary[f"ELOS {c['name'].lower()} (m)"] = c["elos"]
+        res.summary["Dilución estimada (%)"] = 100 * dm["dilution"]
+        res.summary["Mineral por metro de corrida (t/m)"] = dm["t_ore"]
+        res.summary["Estéril por sobrerotura (t/m)"] = dm["t_waste"]
+        if dm["grade_dil"] is not None:
+            res.summary[f"Ley diluida ({dm['unit']})"] = dm["grade_dil"]
     res.frag = dict(B=frag["B"], S=frag["S"], q=frag["q"], Lc=max(frag["Lc"], 0.2), H=frag["H"], d_mm=o.D_mm,
                     W=o.e_coll + o.alpha * frag["H"], rws=ex.rws * 100, modo="optimizar", B_limit=frag["limit"],
                     K_override=frag.get("K_override"), zona="producción")
@@ -754,6 +770,29 @@ def _add_slot(res, rock, ex, o: ProdOptions, rows, order, scene, lg, outline, li
     res.p["slot_plan"] = dict(holes=hs[["X0", "Y0", "zona"]].assign(zona=hs.zona.map(lambda z: zmap.get(z, z))),
                               relief=rl[["X0", "Y0", "d_mm"]], box=(x0, x1, -W / 2, W / 2), width=W)
     return rl[["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"]].reset_index(drop=True), SLOT_ZONES + order
+
+
+def _domain_view(res, o, outline):
+    """Cajas y líneas de sobrerotura en la vista 2D principal (planta de taladros paralelos o anillo)."""
+    from .domains import domain_shapes
+    dm = res.p["domains"]
+    if res.p.get("view_filter") or o.method == PROD_METHODS[2]:
+        regs, obs = domain_shapes(dm, band=max(1.0, 0.12 * o.width), kz=res.p.get("kz_ring", 1.0))
+    else:
+        xs = [p[0] for p in outline] if outline else [0.0, o.length]
+        x0, x1 = min(xs), max(xs)
+        band = max(0.6, 0.15 * o.width)
+        regs, obs = [], []
+        for c in dm["contacts"]:
+            if not c["name"].startswith("Caja"):
+                continue
+            ya, ny = c["a"][0], c["n"][0]
+            out = -1.0 if ny > 0 else 1.0
+            regs.append(([x0, x1, x1, x0, x0], [ya, ya, ya + out * band, ya + out * band, ya], c["name"], c["color"]))
+            if c["elos"] > 1e-3:
+                yo = ya + out * c["elos"] / max(abs(ny), 0.2)
+                obs.append(([x0, x1], [yo, yo], f"Sobrerotura {c['name'].lower()} ({c['elos']:.2f} m)", c["color"]))
+    res.view2d["domain_regions"], res.view2d["domain_lines"] = regs, obs
 
 
 def _parallel_drilling(res, o: ProdOptions, scene, lg):
