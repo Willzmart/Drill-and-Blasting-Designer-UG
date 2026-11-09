@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry.polygon import orient
 
-from .common import (KONYA_EQS, Explosive, Log, Result, Rock, bmax_holmberg, colors_for, dt_y_C,
+from .common import (b_pearse_kv, charge_warnings, KONYA_EQS, Explosive, Log, Result, Rock, bmax_holmberg, colors_for, dt_y_C,
                      factor_carga_tabla, finalize_holes, konya_burden, new_hole, relief_row, summary_common)
 from .cuts import ANGLED_CUTS, CUT_NOTES, CutCtx, make_cut
 from .facelayout import fill_helpers, sample_chain, tunnel_chains
@@ -74,6 +74,7 @@ class AvanceOptions:
     B_prod_override: float | None = None
     SB_prod: float = 1.25
     design: str = DESIGNS[0]
+    cut_x: float | None = None       # posición horizontal del cuele (None = eje de la labor)
 
 
 def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive, o: AvanceOptions,
@@ -107,7 +108,7 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
     F2 = "2. Cuele: " + o.cut_type
     margin = o.contour_offset + 0.15
     max_open = (0.55 if o.narrow else 0.8) * min(A, Ht)
-    pearse = rock.Kv * drill.d1_mm / 1000 * math.sqrt(exm.PD / rock.Std) if o.cut_method == "Pearse" else None
+    pearse = b_pearse_kv(rock.Kv, drill.d1_mm, exm.PD, rock.Std) if o.cut_method == "Pearse" else None
     ctx = CutCtx(d1=d1, d2=d2, NB=drill.NB, H=Hp, F=F, c=c, rws=exm.rws, q_avail=q_avail, UCS=rock.UCS,
                  rho_r=rock.rho, De_mm=exm.De_mm,
                  width=(A - 2 * o.contour_offset) if o.cut_type in ANGLED_CUTS else A - 2 * margin,
@@ -224,6 +225,12 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
     yc = o.cut_height if o.cut_height else 0.36 * (Ht - Ahl) + Ahl / 2
     yc = float(np.clip(yc, Ahl / 2 + 0.25, Ht - Ahl / 2 - 0.25)) if Ht > Ahl + 0.5 else Ht / 2
     xc = 0.0
+    if o.cut_x is not None:      # cuele desplazado (p. ej., dentro de la veta en la voladura selectiva)
+        Awl = cut.opening.bounds[2] - cut.opening.bounds[0]
+        lim = max(0.0, A / 2 - Awl / 2 - margin)
+        xc = float(np.clip(o.cut_x, -lim, lim))
+        if abs(xc - o.cut_x) > 0.02:
+            res.warnings.append(f"El cuele no cabe en x = {o.cut_x:+.2f} m; se ubica en x = {xc:+.2f} m.")
     P["cut_center"] = (xc, yc)
     from shapely import affinity
     opening = affinity.translate(cut.opening, xc, yc)
@@ -311,13 +318,15 @@ def run_avance(section, rock: Rock, drill: Drill, exm: Explosive, exc: Explosive
     existing = [(r["x"], r["y"]) for r in rows]
     d_ring = (max(Bp_h, 0.25) + max(Bp_cor, 0.25)) / 2
     helpers = fill_helpers(s.polygon, cpoly, opening, existing, [(r["x"], r["y"]) for r in rel], Bprod,
-                           o.SB_prod, d_ring, floor_cut=max(Bp_arr, 0.25) + off, center=(xc, yc), mirror_axis=xc)
+                           o.SB_prod, d_ring, floor_cut=max(Bp_arr, 0.25) + off, center=(xc, yc),
+                           mirror_axis=xc if abs(xc) < 1e-9 else None)
     for (x, y) in helpers:
         dx, dy = x - xc, y - yc
         z = "Ayuda de corona" if dy >= abs(dx) * 0.8 else "Ayuda de arrastre" if -dy >= abs(dx) * 0.8 \
             else "Ayuda de hastiales"
         add_face_hole(z, x, y, 0.0, 0.0, Bprod, o.SB_prod * Bprod)
     res.holes = finalize_holes(rows, ZONES)
+    charge_warnings(res)
     res.zone_order = [z for z in ZONES if z in set(res.holes.zona)]
     res.zone_colors = colors_for(ZONES)
     res.simultaneous = set(cut.simultaneous) | ({"Corona"} if controlled else set())

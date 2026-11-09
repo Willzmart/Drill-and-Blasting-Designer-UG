@@ -66,6 +66,8 @@ def view_2d(res, label="id", seq=None, show_vectors=False, show_openings=True, h
             txt = g.periodo.astype(int).astype(str)
         elif label == "kg":
             txt = g.kg.round(1).astype(str)
+        elif label == "disparo" and "disparo" in g:
+            txt = "D" + g.disparo.astype(int).astype(str)
         else:
             txt = None
         cd = np.c_[g.id, g.B.fillna(0), g.kg, g.n_cart, g.L]
@@ -351,6 +353,9 @@ def view_3d(res, system, primer="Fondo", show_shell=True, show_init=True, show_s
                             "#1f77b4"))
         if show_shell:
             fig.add_trace(_prism(sc["outline"], "xz", -2.0, 0.0, 0.07, "Labor excavada"))
+        for i, vc in enumerate(sc.get("vein", [])):
+            fig.add_trace(_poly_mesh(vc, "xz", 0.0, "#d4a017", 0.55, "Veta en el frente" if i == 0 else f"Veta ({i + 1})"))
+            fig.add_trace(_prism(vc, "xz", -2.0, sc["advance"], 0.18, "Veta (mineral)", color="#d4a017"))
         eye = dict(x=-1.25, y=-2.1, z=0.75)
     elif kind == "vertical":
         up = sc["up"]

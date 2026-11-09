@@ -244,7 +244,7 @@ def bmax_langefors(D_mm, rho_e, prp, c, f, sb):
 
 
 def b_pearse_kv(Kv, D_mm, PD, Std):
-    """B = Kv·D/1000·√(PD/Std) — Pearse modificado con Kv de Bórquez ([C] Ec. 06)."""
+    """B máx-arranque = Kv·D/1000·√(PD/Std) — Pearse con Kv de Bórquez ([C] Ec. 06). Solo para el arranque en avance."""
     return Kv * D_mm / 1000 * math.sqrt(PD / Std)
 
 
@@ -358,6 +358,10 @@ def new_hole(zona, grupo, x, y, X0, Y0, Z0, u, L, Lt, cargas, d_mm, explosivo=""
              q=np.nan, cuele=False, primer_s=None, w_cart=0.0, tacos=None):
     u = np.asarray(u, dtype=float)
     u = u / np.linalg.norm(u)
+    had = bool(cargas)
+    # la carga nunca sale del taladro ni tiene longitud negativa (taco más largo que el taladro, etc.)
+    cargas = [(max(0.0, float(s0)), min(float(L), float(s1)), qq) for s0, s1, qq in cargas]
+    cargas = [(s0, s1, qq) for s0, s1, qq in cargas if s1 - s0 > 0.02 and qq > 0]
     kg = float(sum((s1 - s0) * qq for s0, s1, qq in cargas))
     n_cart = int(max(1, round(kg / w_cart))) if (w_cart and kg > 0) else 0
     if primer_s is None:
@@ -366,7 +370,8 @@ def new_hole(zona, grupo, x, y, X0, Y0, Z0, u, L, Lt, cargas, d_mm, explosivo=""
                 Y0=float(Y0), Z0=float(Z0), ux=u[0], uy=u[1], uz=u[2], L=float(L), Lt=float(Lt), cargas=cargas,
                 kg=kg, n_cart=n_cart, explosivo=explosivo, B=float(B) if B == B else np.nan,
                 S=float(S) if S == S else np.nan, q=float(q) if q == q else np.nan, primer_s=float(primer_s),
-                d_mm=float(d_mm), tacos=tacos if tacos is not None else ([(0.0, Lt)] if Lt > 0 else []))
+                d_mm=float(d_mm), tacos=tacos if tacos is not None else ([(0.0, Lt)] if Lt > 0 else []),
+                sin_carga=had and not cargas)
 
 
 def finalize_holes(rows, order):
@@ -468,3 +473,13 @@ def raise_dip_log(res, dip_deg, length, kind, adv=None):
                             f"prevea limpieza o un ángulo mayor si es echadero.")
     res.p["tilt_deg"] = 90.0 - dip_deg
     res.scene3d["tilt"] = math.radians(90.0 - dip_deg)
+
+
+
+def charge_warnings(res):
+    """Avisa de taladros que quedaron sin carga porque el taco (o el retacado) es más largo que el taladro."""
+    h = res.holes
+    if "sin_carga" in h and h.sin_carga.fillna(False).astype(bool).any():
+        n = int(h.sin_carga.fillna(False).astype(bool).sum())
+        res.warnings.append(f"{n} taladro(s) quedan sin carga porque el taco es igual o mayor que su longitud: "
+                            f"reduzca el diámetro o el taco, o aumente la longitud de perforación.")

@@ -108,6 +108,38 @@ Aplica a LBH, taladros largos en vetas angostas, abanicos y VCR. Se configura en
   - Hay advertencia si algún taladro la supera (subnivel intermedio o perforación desde ambos niveles).
   - LBH y VCR pasan a 30 m de altura por defecto para quedar dentro de esa capacidad.
 
+### Correcciones de la auditoría (código)
+- Lunder–Pakalnis ya no falla con pilares esbeltos (w/h ≤ 0.25: Cpav = 0) y avisa cuando w/h < 0.5.
+- Ninguna carga puede salir negativa ni fuera del taladro: si el taco es mayor que el taladro, este queda sin
+  carga y se avisa (chimeneas angostas con Ø grande, etc.).
+- Abanicos: los taladros de menos de 1 m (fondo pegado a la labor) no se perforan y se avisa.
+- Pique en espiral: lleva taladros de contorno y, si el burden no cabe en el radio, un anillo intermedio con aviso
+  (antes podía quedar sin taladros).
+- Langefors en producción: el burden práctico descuenta e′ + α·L (antes 3·α·L, distinto a la memoria).
+
+### Avance de producción (galería en veta)
+
+Nuevo método en **Producción → "Avance de producción (galería en veta)"**: una galería o subnivel que avanza dentro de la veta y cuyo material volado se cuenta como producción.
+
+- **Malla:** es la de una labor de avance (sección, cuele, Holmberg o Konya, carga y contorno), con las mismas opciones de la labor "Avance". Se diseña con las propiedades del mineral.
+- **Veta en el frente:** potencia (ancho verdadero), buzamiento, lado de la caja techo y desplazamiento del eje de la veta respecto al eje de la labor. El ancho horizontal en el frente es w/sen β.
+- **Balance por disparo:** área de mineral y de cada caja (sección ∩ veta); toneladas de mineral y desmonte con la densidad de cada dominio (si el macizo es "por dominios"); dilución = T_des/(T_min + T_des); ley diluida = (T_min·ley + T_des·ley_des)/(T_min + T_des); contenido metálico; t de mineral por metro de avance; costo por tonelada de mineral.
+- **Taladros:** cada uno se clasifica por su boca en mineral, caja techo o caja piso (columna "dominio" del cuadro de taladros).
+- **Vistas y PDF:** la veta y las cajas se sombrean en la vista 2D, en el plano del PDF y en la vista 3D (la veta se prolonga a lo largo de la labor). Energía, fragmentación y secuenciamiento funcionan como en un avance; el sistema de iniciación por defecto es Exsanel LP.
+- **Avisos:** veta que no corta el frente, veta más ancha que la labor (queda mineral en los hastiales) y frentes con más de 50 % de desmonte (se sugiere reducir la sección o la voladura selectiva).
+
+#### Voladura selectiva (circado / desquinche)
+
+Opción del avance de producción ("Voladura selectiva" en la barra lateral): se perfora todo el frente y el mineral y el desmonte se disparan en pegas separadas, cada una con su limpieza.
+
+- **Orden:** "mineral primero, luego el desmonte (desquinche)" o "desmonte primero, luego el mineral (circado)". Con desmonte a ambos lados salen tres disparos (p. ej., caja → mineral → otra caja).
+- **Cuele:** se ubica automáticamente en la región del primer disparo, a la altura del cuele (se recomienda el quemado simple, que pasa a ser el cuele por defecto). Si el cuele sobresale de esa región, la roca de su abertura sale con el primer disparo y se avisa.
+- **Taladros:** cada taladro pertenece al disparo de la región donde está su boca (columna "disparo"); una franja sin taladros propios sale con el disparo anterior.
+- **Balance:** cada disparo vuela su región más una franja de sobrerotura e_c hacia los dominios que aún no se vuelan; una fracción r de su material no se limpia y sale con el siguiente. Los disparos de mineral van a planta y los de desmonte a botadero o relleno. Resultados: mineral y desmonte a planta, dilución selectiva frente a la de un solo disparo, recuperación minera (mineral a planta / mineral in situ del frente), ley a planta y costo por tonelada a planta.
+- **Secuenciamiento:** cada disparo se secuencia por separado; el disparo 1 sale hacia los vacíos del cuele y los siguientes hacia el vacío que dejó el anterior (cara libre a lo largo del contacto). Los tiempos empiezan en 0 en cada pega; en el PDF se rotulan "D1·t", "D2·t".
+- **PDF:** tabla de disparos (dominio, taladros, kg, t de mineral y desmonte, destino), dominios sombreados en la malla de tiempos y disparo de cada taladro en el cuadro.
+- **Supuesto:** e_c (0.10 m) y r (5 %) son referenciales; calíbrelos con el control de leyes y de dilución de la mina.
+
 ### Chimeneas inclinadas (dip)
 - Labor *Chimenea* (todos los métodos) y *Chimenea slot con Simba* (sola): deslizador "Inclinación de la chimenea —
   dip" (90° = vertical). La malla se diseña en la sección perpendicular al eje y los taladros son paralelos al eje.
@@ -226,6 +258,7 @@ El PDF es A4 apaisado y contiene:
 
 - **Konya, ec. 9.14:** la profundidad que asegura el vacío usa L = 0.15 + 34.1·Ø − 39.4·Ø². El ejemplo 9.3 indica más avance con 102 mm, así que solo se emite una advertencia y no se recorta la perforación.
 - **Konya, ecuaciones 9.1–9.5 de anillos:** el PDF del manual no las trae legibles. Se usan las relaciones del texto: N_R = R/B, S = B y N_H = 2πR/S.
+- **Pearse de Carpio (Ec. 06):** B máx‑arranque = Kv·D/1000·√(PD/Std), con Std en kg/cm² (4.5·10.197·0.08·σc) y PD = ρe·VOD²/4. Se usa solo para el B máximo del arranque en avance, como en el libro; en producción ya no aparece porque da piedras de arranque (0.2–0.3 m). En producción queda la versión del curso, con PD de Cook.
 - **Pearse del curso:** se aplica la raíz cuadrada de las diapositivas. La plantilla Excel escribe "^1/2", que Excel evalúa como división entre 2.
 - **Concentración de Kleine:** es un índice estático (no considera los retardos). Crece con el tamaño del patrón, por eso en producción conviene analizar una voladura o un anillo.
 - **K y α de Holmberg–Persson:** valores referenciales (700 y 0.7; la plantilla usa 470 y 0.94). Calíbrelos con monitoreo.

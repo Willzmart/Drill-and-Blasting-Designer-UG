@@ -20,7 +20,7 @@ import numpy as np
 import pandas as pd
 from shapely.geometry import Point, Polygon
 
-from .common import (KONYA_EQS, Explosive, Result, Rock, colors_for, finalize_holes, konya_burden, new_hole,
+from .common import (charge_warnings, KONYA_EQS, Explosive, Result, Rock, colors_for, finalize_holes, konya_burden, new_hole,
                      raise_dip_log, relief_row, summary_common)
 from .cuts import _relief_positions, _sq
 from .facelayout import fill_helpers, uniform_contour
@@ -222,6 +222,7 @@ def run_slot(rock: Rock, ex: Explosive, o: SlotOptions, cost=None) -> Result:
                 nw += 1
         lg.add("2b. Ensanche a cámara slot", "Taladros del ensanche", "N", nw, "")
     res.holes = finalize_holes(rows, order)
+    charge_warnings(res)
     res.relief = pd.DataFrame(rel, columns=["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"])
     res.zone_order = [z for z in order if z in set(res.holes.zona)]
     res.zone_colors = colors_for(order)

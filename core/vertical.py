@@ -11,7 +11,7 @@ from shapely import affinity
 from shapely.geometry import Point, Polygon
 
 from .common import (KONYA_EQS, Explosive, Result, Rock, bmax_holmberg, bmax_langefors, colors_for,
-                     finalize_holes, konya_burden, new_hole, raise_dip_log, relief_row, summary_common)
+                     finalize_holes, konya_burden, new_hole, raise_dip_log, charge_warnings, relief_row, summary_common)
 from .cuts import CUT_NOTES, CutCtx, make_cut
 from .facelayout import fill_helpers, uniform_contour
 
@@ -384,7 +384,18 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
         elif o.method == PIQUE_METHODS[1]:  # espiral
             R = vs.a / 2
             nsec = 8
-            radii = np.arange(R - max(contour_B, 0.3), 0.2, -B_ring)[::-1]
+            r_out = R - o.offset - max(contour_B, 0.3)
+            radii = np.arange(r_out, 0.2, -B_ring)[::-1] if r_out > 0.2 else np.array([])
+            if len(radii) == 0:     # pique pequeño frente al burden: un anillo intermedio
+                radii = np.array([max(0.3, 0.5 * (R - o.offset))])
+                res.warnings.append(f"El burden de destroza ({B_ring:.2f} m) y el del contorno ({contour_B:.2f} m) no caben "
+                                    f"en el radio del pique ({R:.2f} m): se usa un solo anillo intermedio. Reduzca el "
+                                    f"diámetro de perforación o use sección completa.")
+            cont_sp, _ = uniform_contour(vs.polygon, o.offset, contour_S)
+            cq_sp = 90 * d1 ** 2 if not o.contour.startswith("Recorte") else 0.5 * q_av
+            for (x, y, nx_, ny_) in cont_sp:
+                hole("Contorno", x, y, L_face, [(Lt, L_face, cq_sp)], Lt, contour_B, contour_S, cq_sp)
+                rows[-1]["grupo"] = int((math.atan2(y, x) % (2 * math.pi)) / (2 * math.pi / nsec))
             for k in range(nsec):
                 ang0 = 2 * math.pi * k / nsec
                 for rr in radii:
@@ -439,6 +450,7 @@ def run_vertical(labor, vs, rock: Rock, exm: Explosive, o: VerticalOptions, cost
         Lh = L_face
         blk_frag = dict(B=B_ring, S=o.SB * B_ring, q=q_av, Lc=L_face - Lt, H=L_face, Q=q_av * (L_face - Lt))
     res.holes = finalize_holes(rows, order)
+    charge_warnings(res)
     res.relief = pd.DataFrame(rel_rows, columns=["x", "y", "d_mm", "X0", "Y0", "Z0", "ux", "uy", "uz", "L"])
     res.zone_order = [z for z in order if z in set(res.holes.zona)]
     res.zone_colors = colors_for(order)

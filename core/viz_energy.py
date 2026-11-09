@@ -73,6 +73,8 @@ def energy_3d(res, seg, iso=None, show_shell=True, height=720):
         if sc.get("kind") == "tunnel":
             fig.add_trace(_ring(sc["outline"], "xz", 0.0, "Contorno del frente"))
             fig.add_trace(_ring(sc["outline"], "xz", sc["advance"], "Avance esperado", "dash", "#1f77b4"))
+            for vc in sc.get("vein", []):
+                fig.add_trace(_ring(vc, "xz", 0.0, "Veta en el frente", color="#d4a017"))
         elif sc.get("kind") == "vertical":
             fig.add_trace(_ring(sc["outline"], "xy", 0.0, "Contorno del frente"))
         elif "box" in sc:

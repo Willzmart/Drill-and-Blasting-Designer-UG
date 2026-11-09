@@ -362,8 +362,12 @@ def domain_shapes(dinfo, band=2.0, kz=1.0):
 
 
 def _lunder_pakalnis(ucs, w, h):
-    r = w / h
-    cpav = 0.46 * (math.log10(r + 0.75)) ** (1.4 / r)
+    """Lunder y Pakalnis (1997). Para pilares muy esbeltos (w/h ≤ 0.25) log(w/h + 0.75) ≤ 0: el confinamiento
+    medio es nulo (Cpav = 0, κ = 0) y la resistencia queda en 0.44·σci·0.68."""
+    r = max(w / h, 1e-3)
+    base = math.log10(r + 0.75)
+    cpav = 0.46 * base ** (1.4 / r) if base > 0 else 0.0
+    cpav = min(max(cpav, 0.0), 0.999)
     kappa = math.tan(math.acos((1 - cpav) / (1 + cpav)))
     return 0.44 * ucs * (0.68 + 0.52 * kappa)
 
@@ -385,6 +389,9 @@ def pillar_roof(o, dom, ore, an, lg, warnings):
            f"altura = banco {o.height:.1f} + galería piloto {dom.h_head:.1f}")
     lg.add(F, "Sobrerotura media en los pilares", "ELOS_p", elos_p, "m", "de los taladros junto a los pilares")
     lg.add(F, "Ancho efectivo del pilar", "w_ef", w_ef, "m", "w − 2·ELOS_p")
+    if w / hp < 0.5:
+        warnings.append(f"Pilar muy esbelto (w/h = {w / hp:.2f} < 0.5): fuera del rango de calibración de Lunder–Pakalnis "
+                        f"y Hedley–Grant; aumente el ancho del pilar o reduzca su altura.")
     rows = []
     for lab, ww in (("diseño", w), ("tras la voladura", w_ef)):
         sp = sv * ((ww + Wc + (w - ww)) / ww) ** 2      # el área tributaria no cambia; el pilar se adelgaza

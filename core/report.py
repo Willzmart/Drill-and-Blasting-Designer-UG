@@ -259,10 +259,16 @@ def timing_drawing(res, seq, system=""):
     if seq is None or "t_ms" not in seq:
         return None
     h = _plan_holes(res).merge(seq[["id", "t_ms", "periodo", "predecesor"] +
-                                   (["n_detonador"] if "n_detonador" in seq else [])], on="id", how="left")
+                                   (["n_detonador"] if "n_detonador" in seq else []) +
+                                   (["disparo"] if ("disparo" in seq and "disparo" not in res.holes) else [])],
+                               on="id", how="left")
+    bsrc = {k: np.asarray(v) for k, v in ((res.p.get("selective") or {}).get("sources") or {}).items()}
+    multi = "disparo" in h and h.disparo.nunique() > 1
     if h.t_ms.isna().all():
         return None
     fig, ax, out, A, span = _base_axes(res, h)
+    if multi:      # voladura selectiva: dominios (cada uno sale en su disparo)
+        _mpl_domains(ax, res.view2d.get("domain_regions", []), [])
     rmark = max(0.011 * span, 0.03)
     pos = h.set_index("id")[["x", "y"]]
     src = np.asarray(res.sources) if res.sources else np.empty((0, 2))
@@ -281,8 +287,9 @@ def timing_drawing(res, seq, system=""):
         if r.predecesor and int(r.predecesor) in pos.index:
             px, py = pos.loc[int(r.predecesor)]
         elif len(src):
-            k = int(np.argmin(np.hypot(src[:, 0] - r.x, src[:, 1] - r.y)))
-            px, py = src[k]
+            sk = bsrc.get(int(r.disparo), src) if multi and r.disparo == r.disparo else src
+            k = int(np.argmin(np.hypot(sk[:, 0] - r.x, sk[:, 1] - r.y)))
+            px, py = sk[k]
         else:
             continue
         if math.hypot(r.x - px, r.y - py) < 1e-6:
@@ -293,7 +300,7 @@ def timing_drawing(res, seq, system=""):
     for _, r in h.iterrows():
         ax.add_patch(Circle((r.x, r.y), rmark, fc="#1531c9", ec="#0b1b6e", lw=0.5, zorder=6))
         if r.t_ms == r.t_ms:
-            ax.text(r.x, r.y + rmark * 1.25, f"{r.t_ms:.0f}", fontsize=6.8 if len(h) < 90 else 5.2,
+            ax.text(r.x, r.y + rmark * 1.25, (f"D{int(r.disparo)}·" if multi else "") + f"{r.t_ms:.0f}", fontsize=6.8 if len(h) < 90 else 5.2,
                     color="#c2187a", ha="center", va="bottom", zorder=7, fontweight="bold",
                     bbox=dict(fc="white", ec="none", pad=0.15, alpha=0.75))
     ax.scatter([], [], s=28, c="#1531c9", label="Taladro cargado (tiempo en ms, magenta)")
@@ -302,8 +309,9 @@ def timing_drawing(res, seq, system=""):
     ax.plot([], [], color=cmap(0.5), lw=1, label="Secuencia de salida (flecha → taladro siguiente)")
     ax.legend(fontsize=6.5, loc="upper left", bbox_to_anchor=(1.01, 1.0), frameon=False)
     nper = int(np.nanmax(h.periodo)) if "periodo" in h else 0
-    ax.text(1.01, 0.02, f"Sistema: {system}\nRetardos: {nper}\nÚltima salida: {tmax:.0f} ms", transform=ax.transAxes,
-            fontsize=7, va="bottom")
+    ax.text(1.01, 0.02, f"Sistema: {system}\nRetardos: {nper}\nÚltima salida: {tmax:.0f} ms" +
+            (f"\n{int(h.disparo.nunique())} disparos por separado:\nD1·t, D2·t = disparo y tiempo\n(cada pega empieza en 0)"
+             if multi else ""), transform=ax.transAxes, fontsize=7, va="bottom")
     return _finish(fig, ax, res, A, span, f"DISTRIBUCIÓN DEL ACCESORIO DE INICIACIÓN ({system or 'retardos'})")
 
 
@@ -769,7 +777,8 @@ def hole_table_rows(res, seq=None):
         inc = math.degrees(math.asin(max(-1.0, min(1.0, r.uz))))
         Lc = sum(b - a for a, b, _ in r.cargas)
         stem = sum(b - a for a, b in (r.tacos or []))
-        row = [int(r.id), r.zona, f"{r.x:.2f}", f"{r.y:.2f}", f"{r.X0:.2f}", f"{r.Y0:.2f}", f"{r.Z0:.2f}",
+        zlab = r.zona + (f" · D{int(r.disparo)}" if "disparo" in h.columns else "")
+        row = [int(r.id), zlab, f"{r.x:.2f}", f"{r.y:.2f}", f"{r.X0:.2f}", f"{r.Y0:.2f}", f"{r.Z0:.2f}",
                f"{az:.0f}", f"{inc:+.0f}", f"{r.L:.2f}", f"{stem:.2f}", f"{Lc:.2f}", str(r.explosivo),
                str(int(r.n_cart)) if r.n_cart else "—", f"{r.kg:.2f}",
                f"{r.B:.2f}" if r.B == r.B else "—", f"{r.S:.2f}" if r.S == r.S else "—"]
@@ -905,6 +914,22 @@ def build_pdf(res, info: dict, params: list, seq=None, energy=None, system="") -
                               f"máxima sin sostenimiento de Barton {rp['wmax']:.2f} m (2·ESR·Q^0.4); en las "
                               f"intersecciones {1.4142 * rp['w_real']:.2f} m.", st_n)]
         story.append(KeepTogether(blk))
+    sl = res.p.get("selective")
+    if sl:
+        st_th = ParagraphStyle("th2", parent=st_n, fontName=_FONT_B, fontSize=7, leading=8, textColor=colors.white)
+        tb = sl["table"]
+        data = [[Paragraph(x, st_th) for x in ("Disparo", "Dominio", "Taladros", "Explosivo (kg)", "Mineral (t)",
+                                               "Desmonte (t)", "Destino")]] + \
+               [[str(r.Disparo), r.Dominio, str(r.Taladros), f"{r.Explosivo_kg:.2f}", f"{r.Mineral_t:.2f}",
+                 f"{r.Desmonte_t:.2f}", r.Destino] for r in tb.itertuples()]
+        t = Table(data, colWidths=[18 * mm, 30 * mm, 20 * mm, 26 * mm, 24 * mm, 24 * mm, 36 * mm], repeatRows=1)
+        t.setStyle(_grid_style())
+        txt = (f"Dilución con voladura selectiva: {100 * sl['dil_sel']:.1f} % (un solo disparo: "
+               f"{100 * sl['dil_conv']:.1f} %). Recuperación minera: {100 * sl['rec']:.1f} %."
+               + (f" Ley a planta: {sl['grade_plant']:.3f} {sl['unit']}." if sl.get("grade_plant") is not None else "")
+               + " Cada disparo es una pega distinta (se dispara, ventila y limpia antes del siguiente).")
+        story.append(KeepTogether([Spacer(1, 4 * mm), Paragraph("Voladura selectiva (mineral y desmonte por separado)",
+                                                                  st_h), t, Spacer(1, 1.5 * mm), Paragraph(txt, st_n)]))
     if res.warnings:
         story.append(Spacer(1, 3 * mm))
         story.append(Paragraph("Advertencias: " + " · ".join(dict.fromkeys(res.warnings)), st_s))

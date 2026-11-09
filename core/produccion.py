@@ -1,5 +1,5 @@
 """Voladuras subterráneas de producción por método de explotación — López Jimeno (1987) cap. 24,
-fórmula de Langefors (cap. 20), tajeo de Holmberg, Pearse modificado con Kv (Carpio, ec. 06) y los
+fórmula de Langefors (cap. 20), tajeo de Holmberg y los
 criterios del material de capacitación: Konya (caps. 6–7), Ash, Torbica y Lapcevic (2018), Rustan,
 Pearse del curso de taladros largos y el retacado escalonado de anillos (AEL / Onederra y Chitombo)."""
 from __future__ import annotations
@@ -13,9 +13,10 @@ from shapely.geometry import LineString, Point, Polygon
 
 from shapely import affinity
 from .drilling import DrillSetup, carousel, collar_from_pivot, drift_centers, drift_polygon, feed_angle, rig_fits
+from .common import charge_warnings
 from .domains import DomainOptions, apply_domains
 from .slot import SlotOptions, place_slot, run_slot
-from .common import (KONYA_EQS, Explosive, Result, Rock, ash_burden, b_pearse_kv, bmax_holmberg, bmax_langefors,
+from .common import (KONYA_EQS, Explosive, Result, Rock, ash_burden, bmax_holmberg, bmax_langefors,
                      colors_for, finalize_holes, konya_burden, konya_spacing, new_hole, pearse_course_burden,
                      ring_stemming, rustan_burden, summary_common, torbica_burden)
 
@@ -31,7 +32,7 @@ PROD_METHODS = [
     "Cámaras de obra pública — banqueo por fases",
 ]
 CRITERIA = ["Langefors (LJ cap. 20 y 24)", "Holmberg — tajeo (Carpio / LJ cap. 22)",
-            "Pearse modificado con Kv (Carpio ec. 06)", "Consumo específico (LJ §4, subniveles)",
+            "Consumo específico (LJ §4, subniveles)",
             "Konya (Konya caps. 6–7; curso de taladros largos)", "Ash: B = Kb·De/12 (curso)",
             "Torbica y Lapcevic (2018) (curso)", "Pearse con PD de Cook (plantilla del curso)",
             "Rustan: B = 11.8·D^0.63 (Onederra 2007)"]
@@ -43,7 +44,7 @@ NOTES = {
                      "cargas de 100–200 kg por retardo; L_carga/D > 20. Retardos: 50 ms en el mismo barreno, 10 ms "
                      "entre barrenos de una fila y 75 ms entre filas (Du Pont).",
     PROD_METHODS[1]: "Variante de taladros largos para vetas angostas (especialidad citada por Carpio): 1–2 taladros "
-                     "por fila según la potencia; el burden puede calcularse con Pearse modificado con Kv (ec. 06).",
+                     "por fila según la potencia; el burden se calcula con Langefors, Holmberg o los criterios del curso.",
     PROD_METHODS[2]: "LJ §4: CE = CE₀ + 0.03·L + 0.40/AV (kg/m³ de explosivo gelatinoso) en el fondo y en un quinto "
                      "de la longitud; A_e = S·B = q₁/CE; S/B = 1.3–2 (S = 2B da buenos resultados); separación entre "
                      "secciones 1.2–1.8 m; bocas de 51–64 mm; L ≤ 25 m; columna al 50–75 % del fondo.",
@@ -62,7 +63,7 @@ NOTES = {
                      "verticales 50–65 mm). Las fases de galería se diseñan en el modo 'Avance'.",
 }
 DEFAULTS = {  # D (mm), criterio, explosivo sugerido
-    PROD_METHODS[0]: (165, CRITERIA[0]), PROD_METHODS[1]: (64, CRITERIA[0]), PROD_METHODS[2]: (64, CRITERIA[3]),
+    PROD_METHODS[0]: (165, CRITERIA[0]), PROD_METHODS[1]: (64, CRITERIA[0]), PROD_METHODS[2]: (64, CRITERIA[2]),
     PROD_METHODS[3]: (165, CRITERIA[0]), PROD_METHODS[4]: (76, CRITERIA[0]), PROD_METHODS[5]: (45, CRITERIA[1]),
     PROD_METHODS[6]: (38, CRITERIA[0]), PROD_METHODS[7]: (38, CRITERIA[1]), PROD_METHODS[8]: (51, CRITERIA[0]),
 }
@@ -135,7 +136,7 @@ def _burden(o: ProdOptions, rock: Rock, ex: Explosive, L, q, f, log, fase):
     if o.criterion.startswith("Langefors"):
         Bm, ch = bmax_langefors(D, ex.rho, ex.rws, rock.c, f, o.SB)
         long_ = L > 10
-        B = Bm - (2 * D / 1000 + 0.02 * L if long_ else o.e_coll + o.alpha * 3 * L)
+        B = Bm - (2 * D / 1000 + 0.02 * L if long_ else o.e_coll + o.alpha * L)
         log.add(fase, "Piedra máxima (Langefors)", "B_max", Bm, "m", f"D/33·√(ρe·PRP/(ĉ·f·S/B)), ĉ = {ch:.3f}, f = {f}")
         log.add(fase, "Piedra práctica", "B", B, "m", "B_max − 2D − 0.02L" if long_ else "B_max − e' − d_b·L")
         return Bm, B
@@ -145,16 +146,6 @@ def _burden(o: ProdOptions, rock: Rock, ex: Explosive, L, q, f, log, fase):
         log.add(fase, "Burden máximo (Holmberg, tajeo)", "B_max", Bm, "m", f"0.9·√(q·RWS/(Ĉ·f·S/B)), Ĉ = {ch:.3f}")
         log.add(fase, "Burden práctico", "B", Bm - F, "m", "B_max − (e' + α·L)")
         return Bm, Bm - F
-    if o.criterion.startswith("Pearse"):
-        Bm = b_pearse_kv(rock.Kv, D, ex.PD, rock.Std)
-        F = o.e_coll + o.alpha * L
-        log.add(fase, "Burden (Pearse modificado con Kv)", "B_max", Bm, "m",
-                f"Kv·D/1000·√(PD/Std); Kv = {rock.Kv:.3f}, PD = {ex.PD:.0f} MPa, Std = {rock.Std:.1f} MPa")
-        log.add(fase, "Burden práctico", "B", Bm - F, "m", "B_max − (e' + α·L)")
-        if Bm - F < 0.5:
-            log.add(fase, "Advertencia", "—", "Pearse da piedras propias del arranque; en producción se usa B ≥ 0.5 m",
-                    "", "")
-        return Bm, max(Bm - F, 0.25)
     De = ex.De_mm or D
     if o.criterion.startswith("Konya"):
         B0 = konya_burden(De, ex.rho, rock.rho, o.konya_eq, o.stv)
@@ -201,7 +192,6 @@ def burden_table(rock: Rock, ex: Explosive, o: ProdOptions, L: float, q: float) 
     except Exception:  # noqa: BLE001
         pass
     rows.append(("Holmberg — tajeo", bmax_holmberg(q, ex.rws, rock.c, o.f, o.SB)[0], "0.9·√(q·RWS/(Ĉ·f·S/B))"))
-    rows.append(("Pearse con Kv (Carpio)", b_pearse_kv(rock.Kv, D, ex.PD, rock.Std), "Kv·D·√(PD/Std)"))
     rows.append(("Pearse con PD de Cook (curso)", pearse_course_burden(rock.Kv, D, ex.PD_cook, rock.st),
                  "Kv·D·√(PD/(4.5·σt))"))
     for eq in KONYA_EQS:
@@ -216,11 +206,7 @@ def burden_table(rock: Rock, ex: Explosive, o: ProdOptions, L: float, q: float) 
 
 
 def run_produccion(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
-    res = _run(rock, ex, o, cost)
-    if res.frag and res.frag["B"] < 0.5 and o.criterion.startswith("Pearse"):
-        res.warnings.append("Pearse modificado con Kv entrega piedras muy pequeñas para taladros de producción "
-                            "(su ejemplo en Carpio es el arranque); compare con Langefors.")
-    return res
+    return _run(rock, ex, o, cost)
 
 
 def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
@@ -377,6 +363,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         nr = max(1, int(o.length / B))
         Ls = []
         feed2d, dead, coll, angs_c = [], [], [], []
+        n_short = 0
         for j, (tx, ty) in enumerate(toes):
             (cy, cz), dpc = collar_from_pivot(drift, dp, (tx, ty))
             a_c = feed_angle(tx - dp[0], ty - dp[1])
@@ -385,6 +372,12 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
                 coll.append(j)
             dead.append(dpc)
             L = math.hypot(tx - cy, ty - cz)
+            if L < 1.0:          # fondo pegado a la labor de perforación: no se perfora
+                n_short += 1
+                angs_c.pop()
+                if coll and coll[-1] == j:
+                    coll.pop()
+                continue
             if L > 25:
                 res.warnings.append("Hay taladros de más de 25 m: LJ recomienda sistemas de orientación para controlar "
                                     "la desviación.")
@@ -424,6 +417,9 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
         if dead:
             lg.add(F_d, "Distancia pivote–boca (media / máx.)", "—", f"{np.mean(dead):.2f} / {max(dead):.2f}", "m",
                    "las bocas están donde la recta pivote–fondo corta el contorno de la labor")
+        if n_short:
+            res.warnings.append(f"{n_short} taladro(s) del anillo medirían menos de 1 m (el fondo queda pegado a la labor "
+                                f"de perforación) y no se perforan: el tajeo es casi tan ancho como la labor.")
         cars = [list(carousel(ds, dp).exterior.coords)]
         if angs_c:
             for k in sorted({int(np.argmin(angs_c)), int(np.argmax(angs_c))} | set(coll[:3])):
@@ -609,6 +605,7 @@ def _run(rock: Rock, ex: Explosive, o: ProdOptions, cost=None) -> Result:
     if o.domains is not None and o.domains.on and m in DOMAIN_METHODS and rows:
         res.p["domains"] = apply_domains(rows, o, PROD_METHODS, o.domains, rock, ex.w_cart, lg, res.warnings)
     res.holes = finalize_holes(rows, order)
+    charge_warnings(res)
     Lmax = float(res.holes.L.max()) if len(res.holes) else 0.0
     if m in PROD_METHODS[:3] and len(res.holes):
         hp = res.holes[res.holes.grupo >= 0]

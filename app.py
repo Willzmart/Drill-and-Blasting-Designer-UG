@@ -6,6 +6,7 @@ Ejecutar:  streamlit run app.py
 """
 from __future__ import annotations
 
+import dataclasses
 import io
 import json
 import math
@@ -32,6 +33,8 @@ from core.drilling import DrillSetup
 from core.slot import SLOT_BLAST, SLOT_CUTS, SLOT_DIR, SlotOptions, run_slot
 
 SLOT_METHOD = "Chimenea slot con Simba (taladros largos)"
+VEIN_METHOD = "Avance de producción (galería en veta)"
+from core.vein import HW_SIDES, SEL_ORDERS, VeinOptions, apply_selective, apply_vein, selective_cut_x
 from core.produccion import CE0_TABLE, CRITERIA, DEFAULTS, FAN_STEMMING, PROD_METHODS, ProdOptions, run_produccion
 from core.sections import GALLERY_TYPES, PRESETS, VERTICAL_TYPES, build_section, build_vertical_section
 from core.vertical import CHIMENEA_METHODS, PIQUE_METHODS, VerticalOptions, run_vertical
@@ -141,7 +144,8 @@ with st.sidebar.expander("Macizo rocoso", expanded=False):
 rock = {"Mineral": ore, "Caja techo": hw_rock, "Caja piso": fw_rock}[rock_where] or ore
 
 with st.sidebar.expander("Iniciación", expanded=False):
-    system = st.selectbox("Sistema de iniciación", sq.SYSTEMS, index=2 if labor != "Producción" else 4)
+    _face = labor != "Producción" or ss.get("prod_method") == VEIN_METHOD
+    system = st.selectbox("Sistema de iniciación", sq.SYSTEMS, index=2 if _face else 4)
     primer = st.radio("Posición del cebo", ["Fondo", "Boca"], horizontal=True)
 with st.sidebar.expander("Costos unitarios", expanded=False):
     cost = dict(drill=st.number_input("Perforación (US$/m)", 0.0, 100.0, 2.5, 0.1),
@@ -205,107 +209,122 @@ def slot_sidebar():
     return r, sx, [sx], params
 
 
+def avance_sidebar(vein=False, cut_x_fn=None, prefer_burn=False):
+    """Barra lateral y cálculo de una labor de avance (también el avance de producción en veta)."""
+    with st.sidebar.expander("Sección de la galería", expanded=True):
+        kind = st.selectbox("Tipo de galería", GALLERY_TYPES)
+        preset = st.selectbox("Sección típica", ["1.00 x 1.50 (labor artesanal)", "1.50 x 1.50"] + list(PRESETS),
+                              index=4 if vein else 8, key="sec_preset_v" if vein else None)
+        dims = {"1.00 x 1.50 (labor artesanal)": (1.0, 1.5), "1.50 x 1.50": (1.5, 1.5)}.get(preset) or \
+            PRESETS.get(preset) or (3.5, 3.5)
+        c1, c2 = st.columns(2)
+        A = c1.number_input("Ancho A (m)", 0.8, 12.0, float(dims[0]), 0.05)
+        Hs = c2.number_input("Alto H (m)", 1.0, 12.0, float(dims[1]), 0.05)
+        r_arch = st.number_input("Radio del baúl r (m)", 0.1, A / 2, min(1.25, A / 2), 0.05) \
+            if kind.startswith("Baúl") else None
+        top_w = st.number_input("Ancho en el techo (m)", 0.3, A, round(0.8 * A, 2), 0.05) \
+            if kind.startswith("Trapezoidal") else None
+        narrow = st.checkbox("Modo labor estrecha", value=A * Hs <= 4.0,
+                             help="Limita el cuele al ancho disponible y compara con el predimensionamiento de Carpio.")
+        if A < 1.5 or Hs < 1.5:
+            st.warning("Sección menor a 1.5 × 1.5 m: revise el estándar de sostenimiento y evacuación.")
+    with st.sidebar.expander("Cuele", expanded=True):
+        design = st.radio("Criterio de diseño de la malla", DESIGNS,
+                          help="Konya: B = 0.012·(2ρe/ρr + 1.5)·De; auxiliares S = 1.1B, T = 0.5B; piso T = 0.2B; "
+                               "recorte S = 0.45–0.60 m, B = 1.3S, q = D²/12 g/m; look-out 0.1 + H·tan 2°.")
+        default_cut = "Quemado simple" if (narrow or prefer_burn) else (
+            "Cuña quemada — Konya (barreno vacío grande)" if design.startswith("Konya") else CUT_TYPES[0])
+        cut_type = st.selectbox("Tipo de cuele", CUT_TYPES, index=CUT_TYPES.index(default_cut),
+                                key=f"cut{design[:3]}{narrow}{prefer_burn}")
+        st.caption(CUT_NOTES.get(cut_type, ""))
+        cut_method, cut_factor, n_quad, burn_sp = "Holmberg", 1.7, None, None
+        vertex, advf, dcr, Et, dlo = 60.0, 0.475, 200.0, 1.5, 0.5
+        if cut_type.startswith("Cilíndrico 4"):
+            cut_method = st.radio("B_max del arranque", ["Holmberg", "Pearse"], horizontal=True)
+            if cut_method == "Holmberg":
+                cut_factor = st.radio("Factor", [1.7, 1.5], horizontal=True, format_func=lambda v: f"{v}·Ø_equiv")
+            if st.radio("N° de cuadrantes", ["Automático", "Manual"], horizontal=True) == "Manual":
+                n_quad = st.slider("Cuadrantes", 1, 3, 3)
+        elif cut_type in ("Quemado simple", "Quemado Sarrois"):
+            if st.checkbox("Fijar distancia entre ejes", False):
+                burn_sp = st.number_input("Distancia (m)", 0.06, 0.30, 0.12, 0.01)
+        elif cut_type in ("En V / cuña", "En abanico", "Instantáneo piramidal"):
+            vertex = st.slider("Ángulo interior de la cuña (°)", 40, 90, 60)
+            if cut_type != "Instantáneo piramidal":
+                advf = st.slider("Avance / ancho", 0.40, 0.55, 0.475, 0.005)
+        elif cut_type.startswith("Cráter"):
+            dcr = st.number_input("Ø barreno central (mm)", 76.0, 250.0, 200.0, 1.0)
+            Et = st.number_input("Factor energía-tensión E_t", 0.8, 3.0, 1.5, 0.05)
+            dlo = st.number_input("Relación óptima Δ_o", 0.3, 0.8, 0.5, 0.05)
+    with st.sidebar.expander("Perforación", expanded=False):
+        c1, c2 = st.columns(2)
+        d1 = c1.number_input("Ø producción (mm)", 22.0, 76.0, 32.0 if narrow else 45.0, 1.0)
+        d2 = c2.number_input("Ø vacío / rimado (mm)", 22.0, 203.0, 38.0 if narrow else 102.0, 1.0)
+        NB = c1.number_input("N° de vacíos", 1, 4, 2)
+        bar_ft = c2.number_input("Barra (pies)", 3.0, 20.0, 4.0 if narrow else 11.0, 0.5)
+        eff = st.slider("Eficiencia de perforación (%)", 70, 100, 95)
+        Fm = st.selectbox("Error de perforación F", ["Dato directo", "Ec. 26", "Ec. 27"])
+        Fv, alpha, ecol = 0.04, 10.0, 20.0
+        if Fm == "Dato directo":
+            Fv = st.number_input("F (m)", 0.0, 0.5, 0.04, 0.005)
+        elif Fm == "Ec. 26":
+            alpha = c1.number_input("α (mm/m)", 0.0, 50.0, 10.0)
+            ecol = c2.number_input("e (mm)", 0.0, 100.0, 20.0)
+    with st.sidebar.expander("Explosivos y carga", expanded=False):
+        exm = explosive_picker("Explosivo principal", "Emulnor 1000", '7/8" x 7"' if narrow else '1 1/4" x 12"', "am")
+        exc = explosive_picker("Explosivo de corona", "Emulnor 500", '1" x 12"', "ac")
+        charge_method = st.selectbox("Método de carga", CHARGE_METHODS)
+        atac = st.number_input("Factor de atacado del cartucho", 0.6, 1.0, 1.0, 0.05,
+                               help="Longitud que ocupa el cartucho atacado / longitud nominal. Las plantillas del "
+                                    "curso usan 0.8 (el cartucho se comprime y aumenta la carga por metro).")
+        exm.atacado = exc.atacado = atac
+    with st.sidebar.expander("Contorno y otros", expanded=False):
+        contour_mode = st.selectbox("Contorno", ["Voladura controlada (S = K·Ø1, q = 90·Ø1²)",
+                                                 "Sin voladura controlada (f = 1.2, S/B = 1.25)"],
+                                    index=1 if narrow else 0)
+        c1, c2 = st.columns(2)
+        gamma = c1.number_input("γ (°)", 0.0, 10.0, 3.0, 0.5)
+        Kc = c2.number_input("K corona", 10.0, 20.0, 15.0, 0.5)
+        c_rule = st.selectbox("Ĉ", ["Iterativa", "c + 0.05"])
+        offset = st.number_input("Separación del contorno (m)", 0.0, 0.3, 0.10, 0.01)
+        cut_h = st.number_input("Altura del cuele (m)", 0.3, 8.0, 0.6, 0.05) if st.checkbox("Fijar altura del cuele") else None
+        beff = st.slider("Eficiencia de voladura (%)", 70, 100, 95) / 100
+    key = f"Avance|{cut_type}"
+    ov = ss.overrides.get(key, (None, None))
+    section = build_section(kind, A, Hs, r_arch, top_w)
+    drill = Drill(d1_mm=d1, d2_mm=d2, NB=int(NB), bar_m=bar_ft * 0.3048, eff=eff / 100, F_method=Fm, F_value=Fv,
+                  alpha_mm_m=alpha, e_mm=ecol)
+    opts = AvanceOptions(cut_type=cut_type, cut_method=cut_method, cut_factor=float(cut_factor), n_quadrants=n_quad,
+                         burn_spacing=burn_sp, vertex_deg=vertex, adv_factor=advf, d_crater_mm=dcr, Et=Et,
+                         delta_o=dlo, gamma_deg=gamma, K_corona=Kc, contour_mode=contour_mode, c_hat_rule=c_rule,
+                         contour_offset=offset, cut_height=cut_h, blast_eff=beff, charge_method=charge_method,
+                         narrow=narrow, B_prod_override=ov[0], SB_prod=ov[1] or (1.1 if design.startswith("Konya") else 1.25),
+                         design=design)
+    opts0 = dataclasses.replace(opts)
+    res = run_avance(section, rock, drill, exm, exc, opts, cost)
+    if cut_x_fn is not None:      # cuele dentro de la región del primer disparo (voladura selectiva)
+        cx = cut_x_fn(section, res.p["cut_center"][1])
+        if cx is not None:
+            opts0.cut_x = cx
+            res = run_avance(section, rock, drill, exm, exc, opts0, cost)
+    main_exp = exm
+    used_exps = [exm, exc]
+    pdf_params = [("Sección", f"{kind} {A:.2f} × {Hs:.2f} m"), ("Criterio de diseño", design),
+                  ("Cuele", cut_type), ("Ø producción / vacío", f"{d1:.0f} / {d2:.0f} mm × {int(NB)}"),
+                  ("Barra · eficiencia", f"{bar_ft:.1f} pies · {eff} %"), ("Explosivo", exm.label()),
+                  ("Explosivo de corona", exc.label()), ("Método de carga", charge_method), ("Contorno", contour_mode)]
+    if vein:
+        key = f"Producción|Avance en veta|{cut_type}"
+    return res, exm, [exm, exc], pdf_params, key, section
+
+
 # ---------------------------------------------------------------------------
 res = None
 err = None
+method = None
 try:
     if labor == "Avance":
-        with st.sidebar.expander("Sección de la galería", expanded=True):
-            kind = st.selectbox("Tipo de galería", GALLERY_TYPES)
-            preset = st.selectbox("Sección típica", ["1.00 x 1.50 (labor artesanal)", "1.50 x 1.50"] + list(PRESETS),
-                                  index=8)
-            dims = {"1.00 x 1.50 (labor artesanal)": (1.0, 1.5), "1.50 x 1.50": (1.5, 1.5)}.get(preset) or \
-                PRESETS.get(preset) or (3.5, 3.5)
-            c1, c2 = st.columns(2)
-            A = c1.number_input("Ancho A (m)", 0.8, 12.0, float(dims[0]), 0.05)
-            Hs = c2.number_input("Alto H (m)", 1.0, 12.0, float(dims[1]), 0.05)
-            r_arch = st.number_input("Radio del baúl r (m)", 0.1, A / 2, min(1.25, A / 2), 0.05) \
-                if kind.startswith("Baúl") else None
-            top_w = st.number_input("Ancho en el techo (m)", 0.3, A, round(0.8 * A, 2), 0.05) \
-                if kind.startswith("Trapezoidal") else None
-            narrow = st.checkbox("Modo labor estrecha", value=A * Hs <= 4.0,
-                                 help="Limita el cuele al ancho disponible y compara con el predimensionamiento de Carpio.")
-            if A < 1.5 or Hs < 1.5:
-                st.warning("Sección menor a 1.5 × 1.5 m: revise el estándar de sostenimiento y evacuación.")
-        with st.sidebar.expander("Cuele", expanded=True):
-            design = st.radio("Criterio de diseño de la malla", DESIGNS,
-                              help="Konya: B = 0.012·(2ρe/ρr + 1.5)·De; auxiliares S = 1.1B, T = 0.5B; piso T = 0.2B; "
-                                   "recorte S = 0.45–0.60 m, B = 1.3S, q = D²/12 g/m; look-out 0.1 + H·tan 2°.")
-            default_cut = "Quemado simple" if narrow else (
-                "Cuña quemada — Konya (barreno vacío grande)" if design.startswith("Konya") else CUT_TYPES[0])
-            cut_type = st.selectbox("Tipo de cuele", CUT_TYPES, index=CUT_TYPES.index(default_cut),
-                                    key=f"cut{design[:3]}{narrow}")
-            st.caption(CUT_NOTES.get(cut_type, ""))
-            cut_method, cut_factor, n_quad, burn_sp = "Holmberg", 1.7, None, None
-            vertex, advf, dcr, Et, dlo = 60.0, 0.475, 200.0, 1.5, 0.5
-            if cut_type.startswith("Cilíndrico 4"):
-                cut_method = st.radio("B_max del arranque", ["Holmberg", "Pearse"], horizontal=True)
-                if cut_method == "Holmberg":
-                    cut_factor = st.radio("Factor", [1.7, 1.5], horizontal=True, format_func=lambda v: f"{v}·Ø_equiv")
-                if st.radio("N° de cuadrantes", ["Automático", "Manual"], horizontal=True) == "Manual":
-                    n_quad = st.slider("Cuadrantes", 1, 3, 3)
-            elif cut_type in ("Quemado simple", "Quemado Sarrois"):
-                if st.checkbox("Fijar distancia entre ejes", False):
-                    burn_sp = st.number_input("Distancia (m)", 0.06, 0.30, 0.12, 0.01)
-            elif cut_type in ("En V / cuña", "En abanico", "Instantáneo piramidal"):
-                vertex = st.slider("Ángulo interior de la cuña (°)", 40, 90, 60)
-                if cut_type != "Instantáneo piramidal":
-                    advf = st.slider("Avance / ancho", 0.40, 0.55, 0.475, 0.005)
-            elif cut_type.startswith("Cráter"):
-                dcr = st.number_input("Ø barreno central (mm)", 76.0, 250.0, 200.0, 1.0)
-                Et = st.number_input("Factor energía-tensión E_t", 0.8, 3.0, 1.5, 0.05)
-                dlo = st.number_input("Relación óptima Δ_o", 0.3, 0.8, 0.5, 0.05)
-        with st.sidebar.expander("Perforación", expanded=False):
-            c1, c2 = st.columns(2)
-            d1 = c1.number_input("Ø producción (mm)", 22.0, 76.0, 32.0 if narrow else 45.0, 1.0)
-            d2 = c2.number_input("Ø vacío / rimado (mm)", 22.0, 203.0, 38.0 if narrow else 102.0, 1.0)
-            NB = c1.number_input("N° de vacíos", 1, 4, 2)
-            bar_ft = c2.number_input("Barra (pies)", 3.0, 20.0, 4.0 if narrow else 11.0, 0.5)
-            eff = st.slider("Eficiencia de perforación (%)", 70, 100, 95)
-            Fm = st.selectbox("Error de perforación F", ["Dato directo", "Ec. 26", "Ec. 27"])
-            Fv, alpha, ecol = 0.04, 10.0, 20.0
-            if Fm == "Dato directo":
-                Fv = st.number_input("F (m)", 0.0, 0.5, 0.04, 0.005)
-            elif Fm == "Ec. 26":
-                alpha = c1.number_input("α (mm/m)", 0.0, 50.0, 10.0)
-                ecol = c2.number_input("e (mm)", 0.0, 100.0, 20.0)
-        with st.sidebar.expander("Explosivos y carga", expanded=False):
-            exm = explosive_picker("Explosivo principal", "Emulnor 1000", '7/8" x 7"' if narrow else '1 1/4" x 12"', "am")
-            exc = explosive_picker("Explosivo de corona", "Emulnor 500", '1" x 12"', "ac")
-            charge_method = st.selectbox("Método de carga", CHARGE_METHODS)
-            atac = st.number_input("Factor de atacado del cartucho", 0.6, 1.0, 1.0, 0.05,
-                                   help="Longitud que ocupa el cartucho atacado / longitud nominal. Las plantillas del "
-                                        "curso usan 0.8 (el cartucho se comprime y aumenta la carga por metro).")
-            exm.atacado = exc.atacado = atac
-        with st.sidebar.expander("Contorno y otros", expanded=False):
-            contour_mode = st.selectbox("Contorno", ["Voladura controlada (S = K·Ø1, q = 90·Ø1²)",
-                                                     "Sin voladura controlada (f = 1.2, S/B = 1.25)"],
-                                        index=1 if narrow else 0)
-            c1, c2 = st.columns(2)
-            gamma = c1.number_input("γ (°)", 0.0, 10.0, 3.0, 0.5)
-            Kc = c2.number_input("K corona", 10.0, 20.0, 15.0, 0.5)
-            c_rule = st.selectbox("Ĉ", ["Iterativa", "c + 0.05"])
-            offset = st.number_input("Separación del contorno (m)", 0.0, 0.3, 0.10, 0.01)
-            cut_h = st.number_input("Altura del cuele (m)", 0.3, 8.0, 0.6, 0.05) if st.checkbox("Fijar altura del cuele") else None
-            beff = st.slider("Eficiencia de voladura (%)", 70, 100, 95) / 100
-        key = f"Avance|{cut_type}"
-        ov = ss.overrides.get(key, (None, None))
-        section = build_section(kind, A, Hs, r_arch, top_w)
-        drill = Drill(d1_mm=d1, d2_mm=d2, NB=int(NB), bar_m=bar_ft * 0.3048, eff=eff / 100, F_method=Fm, F_value=Fv,
-                      alpha_mm_m=alpha, e_mm=ecol)
-        opts = AvanceOptions(cut_type=cut_type, cut_method=cut_method, cut_factor=float(cut_factor), n_quadrants=n_quad,
-                             burn_spacing=burn_sp, vertex_deg=vertex, adv_factor=advf, d_crater_mm=dcr, Et=Et,
-                             delta_o=dlo, gamma_deg=gamma, K_corona=Kc, contour_mode=contour_mode, c_hat_rule=c_rule,
-                             contour_offset=offset, cut_height=cut_h, blast_eff=beff, charge_method=charge_method,
-                             narrow=narrow, B_prod_override=ov[0], SB_prod=ov[1] or (1.1 if design.startswith("Konya") else 1.25),
-                             design=design)
-        res = run_avance(section, rock, drill, exm, exc, opts, cost)
-        main_exp = exm
-        used_exps = [exm, exc]
-        pdf_params = [("Sección", f"{kind} {A:.2f} × {Hs:.2f} m"), ("Criterio de diseño", design),
-                      ("Cuele", cut_type), ("Ø producción / vacío", f"{d1:.0f} / {d2:.0f} mm × {int(NB)}"),
-                      ("Barra · eficiencia", f"{bar_ft:.1f} pies · {eff} %"), ("Explosivo", exm.label()),
-                      ("Explosivo de corona", exc.label()), ("Método de carga", charge_method), ("Contorno", contour_mode)]
+        res, main_exp, used_exps, pdf_params, key, _sec = avance_sidebar()
     elif labor in ("Chimenea", "Pique"):
         methods = CHIMENEA_METHODS if labor == "Chimenea" else PIQUE_METHODS
         with st.sidebar.expander("Sección y método", expanded=True):
@@ -370,10 +389,57 @@ try:
         if labor == "Chimenea":
             pdf_params.append(("Inclinación de la chimenea", f"{vdip}°" + (" (vertical)" if vdip == 90 else "")))
     else:
-        method = st.sidebar.selectbox("Método", PROD_METHODS + [SLOT_METHOD])
+        method = st.sidebar.selectbox("Método", PROD_METHODS + [SLOT_METHOD, VEIN_METHOD], key="prod_method")
         if method == SLOT_METHOD:
             res, main_exp, used_exps, pdf_params = slot_sidebar()
             key = f"Producción|{method}"
+        elif method == VEIN_METHOD:
+            vo = VeinOptions()
+            with st.sidebar.expander("Veta", expanded=True):
+                st.caption("Galería o subnivel que avanza dentro de la veta: la malla es la de un avance y el material "
+                           "volado se cuenta como producción (mineral + desmonte de las cajas).")
+                c1, c2 = st.columns(2)
+                vo.potencia = c1.number_input("Potencia de la veta (m)", 0.1, 30.0, 1.2, 0.05, key="vn_w",
+                                              help="Ancho verdadero, perpendicular a las cajas.")
+                vo.dip_deg = float(c2.slider("Buzamiento (°)", 20, 90, 70, key="vn_dip"))
+                vo.hw_side = c1.radio("Caja techo hacia la", HW_SIDES, key="vn_side",
+                                      help="Lado del frente (mirando el frente) hacia donde buza la veta.")
+                vo.offset = c2.number_input("Desplazamiento del eje de la veta (m)", -10.0, 10.0, 0.0, 0.05, key="vn_off",
+                                            help="Distancia horizontal, a media altura, entre el eje de la labor y el "
+                                                 "centro de la veta (+ a la derecha).")
+                vo.grade = c1.number_input("Ley in situ (0 = no calcular)", 0.0, 10000.0, 0.0, 0.1, key="vn_g")
+                vo.grade_unit = c2.selectbox("Unidad de ley", GRADE_UNITS, key="vn_gu")
+                if vo.grade:
+                    vo.waste_grade = c1.number_input("Ley del desmonte", 0.0, 10000.0, 0.0, 0.1, key="vn_gw")
+            with st.sidebar.expander("Voladura selectiva", expanded=False):
+                vo.selective = st.checkbox("Disparar el mineral y el desmonte por separado", False, key="vn_sel",
+                                           help="Circado / desquinche: se perfora todo el frente y se dispara en dos (o "
+                                                "tres) pegas; cada una se limpia por separado. El cuele se ubica en la "
+                                                "región del primer disparo.")
+                if vo.selective:
+                    vo.order = st.radio("Orden", SEL_ORDERS, key="vn_ord")
+                    c1, c2 = st.columns(2)
+                    vo.e_contact = c1.number_input("Sobrerotura en el contacto (m)", 0.0, 0.5, 0.10, 0.01, key="vn_ec",
+                                                   help="Franja del dominio que aún no se vuela y que rompe el disparo "
+                                                        "(sale con él).")
+                    vo.residual = c2.number_input("Material no limpiado (%)", 0.0, 30.0, 5.0, 0.5, key="vn_res",
+                                                  help="Parte de cada disparo que queda en el piso y sale con el "
+                                                       "siguiente.") / 100
+            cfn = (lambda sec_, y_: selective_cut_x(sec_, vo, y_)[0]) if vo.selective else None
+            res, main_exp, used_exps, pdf_params, key, vsec = avance_sidebar(vein=True, cut_x_fn=cfn, prefer_burn=vo.selective)
+            apply_vein(res, vsec, vo, ore, hw_rock, fw_rock, cost)
+            if vo.selective:
+                apply_selective(res, vsec, vo, ore, hw_rock, fw_rock,
+                                selective_cut_x(vsec, vo, res.p["cut_center"][1])[1])
+                key += "|selectiva"
+            pdf_params = [("Método", VEIN_METHOD)] + pdf_params + [
+                ("Veta (potencia · buzamiento)", f"{vo.potencia:.2f} m · {vo.dip_deg:.0f}° hacia la {vo.hw_side.lower()}"),
+                ("Desplazamiento del eje de la veta", f"{vo.offset:+.2f} m")]
+            if vo.selective:
+                pdf_params.append(("Voladura selectiva", f"{vo.order}; sobrerotura {vo.e_contact:.2f} m; "
+                                                         f"no limpiado {100 * vo.residual:.0f} %"))
+            if vo.grade:
+                pdf_params.append(("Ley in situ / desmonte", f"{vo.grade:g} / {vo.waste_grade:g} {vo.grade_unit}"))
         else:
             with st.sidebar.expander("Método de explotación", expanded=True):
                 Dd, crit_d = DEFAULTS[method]
@@ -669,6 +735,8 @@ try:
 except Exception as e:  # noqa: BLE001
     err = e
 
+# el avance de producción en veta se trata como un avance en las vistas, la energía y el secuenciamiento
+face_labor = "Avance" if (labor == "Avance" or (labor == "Producción" and method == VEIN_METHOD)) else labor
 if res is None:
     st.error(f"No se pudo generar el diseño con estos datos: {err}")
     st.stop()
@@ -696,6 +764,29 @@ m[3].metric("Factor de carga", f"{S['Factor de carga (kg/m³)']:.2f} kg/m³")
 m[4].metric("Consumo", f"{S['Factor de carga (g/t)']:.0f} g/t")
 m[5].metric("Costo (US$/m)" if "Costo por metro de avance (US$/m)" in S else "Costo (US$/t)",
             f"{S.get('Costo por metro de avance (US$/m)', S.get('Costo por tonelada (US$/t)', 0)):.1f}")
+if res.p.get("vein"):
+    vn = res.p["vein"]
+    m2 = st.columns(6)
+    m2[0].metric("Mineral por disparo", f"{vn['t_ore']:.1f} t")
+    m2[1].metric("Desmonte por disparo", f"{vn['t_waste']:.1f} t")
+    m2[2].metric("Dilución", f"{100 * vn['dilution']:.0f} %")
+    m2[3].metric("Mineral por metro", f"{S['Mineral por metro de avance (t/m)']:.1f} t/m")
+    if vn["grade_dil"] is not None:
+        gu = next(k for k in S if k.startswith("Ley diluida"))
+        m2[4].metric("Ley diluida", f"{vn['grade_dil']:.2f} {gu[13:-1]}")
+    if "Costo por tonelada de mineral (US$/t)" in S:
+        m2[5].metric("Costo por t de mineral", f"{S['Costo por tonelada de mineral (US$/t)']:.1f} US$/t")
+    sl = res.p.get("selective")
+    if sl:
+        m3 = st.columns(6)
+        m3[0].metric("Disparos (selectiva)", sl["n"])
+        m3[1].metric("Mineral a planta", f"{sl['plant_ore']:.1f} t")
+        m3[2].metric("Desmonte a planta", f"{sl['plant_w']:.1f} t")
+        m3[3].metric("Dilución selectiva", f"{100 * sl['dil_sel']:.0f} %",
+                     f"{100 * (sl['dil_sel'] - sl['dil_conv']):+.0f} pts vs un disparo", delta_color="inverse")
+        m3[4].metric("Recuperación minera", f"{100 * sl['rec']:.0f} %")
+        if sl["grade_plant"] is not None:
+            m3[5].metric("Ley a planta", f"{sl['grade_plant']:.2f} {sl['unit']}")
 if ss.overrides.get(key, (None, None))[0]:
     st.info(f"Burden impuesto por la optimización de P80: B = {ss.overrides[key][0]:.2f} m "
             f"(S/B = {ss.overrides[key][1] or 1.25:.2f}). Puede restablecerlo en la pestaña de fragmentación.")
@@ -714,7 +805,7 @@ with tabs[0]:
         st.info(note)
     if cnote:
         st.caption("Cuele: " + cnote)
-    if labor == "Avance":
+    if face_labor == "Avance":
         c1, c2 = st.columns(2)
         if (ASSETS / "diagrama_flujo.png").exists():
             with c1.expander("Diagrama de flujo del método Holmberg"):
@@ -726,6 +817,15 @@ with tabs[0]:
     for fase in sorted(log.Fase.unique(), key=lambda f: f.split(" ")[0]):
         with st.expander(fase, expanded=True):
             st.dataframe(log[log.Fase == fase].drop(columns="Fase"), hide_index=True, width="stretch")
+    if res.p.get("selective"):
+        with st.expander("Voladura selectiva: disparos por separado", expanded=True):
+            st.dataframe(res.p["selective"]["table"].rename(columns={"Explosivo_kg": "Explosivo (kg)",
+                                                                     "Mineral_t": "Mineral (t)",
+                                                                     "Desmonte_t": "Desmonte (t)"}),
+                         hide_index=True, width="stretch")
+            st.caption("Cada disparo es una pega distinta: se dispara, se ventila y se limpia antes del siguiente. "
+                       "El cuele va en el primer disparo; los siguientes salen hacia el vacío que deja el anterior. "
+                       "En la pestaña Secuenciamiento cada disparo se secuencia con sus propios tiempos.")
     if res.p.get("burden_table") is not None:
         with st.expander("Comparación de criterios de burden (mismo Ø y explosivo)", expanded=False):
             st.dataframe(res.p["burden_table"].round(3), hide_index=True, width="stretch")
@@ -866,7 +966,7 @@ with tabs[1]:
                 unit = c2.selectbox("Unidad", ["cm", "mm", "m"])
                 scale = {"cm": 1.0, "mm": 0.1, "m": 100.0}[unit]
                 n_u = c3.number_input("n (si predice X50)", 0.5, 3.0, 1.5, 0.05)
-                st.caption(f"Use un modelo entrenado con datos de **{labor.lower()}**: no mezcle avance y producción.")
+                st.caption(f"Use un modelo entrenado con datos de **{face_labor.lower()}**: no mezcle avance y producción.")
                 base_vals = dict(d_mm=fp["d_mm"], q=fp["q"], H=fp["H"], Lc=fp["Lc"], Lt=fp["H"] - fp["Lc"], RMR=rock.RMR,
                                  GSI=rock.GSI, RQD=rock.RQD, UCS=rock.UCS, rho_r=rock.rho, VOD=main_exp.vod, rho_e=main_exp.rho,
                                  RWS=main_exp.rws * 100, A_sec=S.get("Área de la sección (m²)", 0.0))
@@ -886,7 +986,7 @@ with tabs[1]:
                         c1, c2 = st.columns(2)
                         SBr = c1.slider("Rango S/B", 1.0, 2.0, (1.0, 1.6), 0.05)
                         lam = c2.slider("Peso del costo λ", 0.0, 1.0, 0.15, 0.05)
-                        mkey = (labor, res.metodo, P80_t, B_min, round(B_lim, 3), SBr, lam, tuple(names), unit, target_kind)
+                        mkey = (face_labor, res.metodo, P80_t, B_min, round(B_lim, 3), SBr, lam, tuple(names), unit, target_kind)
                         if st.button("Optimizar con Evolución Diferencial"):
                             with st.spinner("Optimizando…"):
                                 ss.ml_res = (mkey,) + fr.optimize_ml(model, names, base_vals, P80_t, (B_min, B_lim), SBr,
@@ -910,8 +1010,9 @@ with tabs[1]:
 # =============================================================================
 with tabs[2]:
     c1, c2, c3 = st.columns(3)
-    label = c1.selectbox("Etiqueta", ["id", "periodo", "kg", "ninguna"], format_func={
-        "id": "N° de taladro", "periodo": "N° de retardo", "kg": "Carga (kg)", "ninguna": "Sin etiqueta"}.get)
+    label = c1.selectbox("Etiqueta", ["id", "periodo", "kg", "ninguna"] + (["disparo"] if "disparo" in H else []),
+                         format_func={"id": "N° de taladro", "periodo": "N° de retardo", "kg": "Carga (kg)",
+                                      "ninguna": "Sin etiqueta", "disparo": "N° de disparo (selectiva)"}.get)
     vec = c2.checkbox("Vectores de salida (con secuencia)", False)
     opn = c3.checkbox("Aberturas del cuele", True)
     st.plotly_chart(viz.view_2d(res, label, ss.seq, vec and ss.seq is not None, opn), width="stretch")
@@ -952,7 +1053,7 @@ with tabs[4]:
     g2.dataframe(etab.round(3), hide_index=True, width="stretch", height=360)
     st.divider()
     scope = "voladura"
-    if labor == "Producción" and not res.p.get("blast_all"):
+    if face_labor == "Producción" and not res.p.get("blast_all"):
         scope = st.radio("Taladros considerados", ["voladura", "malla"], horizontal=True,
                          format_func={"voladura": f"Una voladura ({res.p.get('rows_blast', 1)} fila(s) o anillo(s))",
                                       "malla": "Toda la malla dibujada"}.get,
@@ -1036,7 +1137,7 @@ with tabs[4]:
 
 # =============================================================================
 with tabs[5]:
-    prod = labor == "Producción"
+    prod = face_labor == "Producción"
     c1, c2, c3 = st.columns(3)
     with c1:
         meth = st.radio("Método", ["Por filas", "MILP", "Heurística"] if prod else ["MILP", "Heurística"],
@@ -1091,7 +1192,8 @@ with tabs[5]:
             opt = dict(classic=classic, qmax=qmax, nmax=int(nmax), cut_single=cut_single, method=meth, time_limit=tl,
                        link=link, carpio_gap=carpio_gap, simultaneous=res.simultaneous if sim_on else set())
             with st.spinner("Calculando…"):
-                seq, info = sq.run_sequencing(H, res.sources, opt, system, cfg, rock.RMR)
+                seq, info = sq.run_sequencing_blasts(H, res.sources, opt, system, cfg, rock.RMR,
+                                                     (res.p.get("selective") or {}).get("sources"))
             ss.seq, ss.seq_sig, ss.seq_info, ss.seq_qmax = seq, sig, info, qmax
             st.rerun()
     if ss.seq is not None:
@@ -1115,8 +1217,9 @@ with tabs[5]:
             st.plotly_chart(viz.charge_per_delay(dd, ss.seq_qmax), width="stretch")
         else:
             st.plotly_chart(viz.charge_per_delay(seq, ss.seq_qmax), width="stretch")
-        cols = ["orden", "id", "zona", "periodo", "n_detonador", "t_ms", "predecesor", "kg", "x", "y"] + \
-               (["mecha_m"] if "mecha_m" in seq else [])
+        cols = (["disparo"] if "disparo" in seq else []) + \
+            ["orden", "id", "zona", "periodo", "n_detonador", "t_ms", "predecesor", "kg", "x", "y"] + \
+            (["mecha_m"] if "mecha_m" in seq else [])
         st.dataframe(seq[cols].round(3), hide_index=True, width="stretch")
         st.download_button("Descargar secuencia (CSV)", seq[cols].to_csv(index=False).encode("utf-8"),
                            "secuencia.csv", "text/csv")
@@ -1161,7 +1264,8 @@ with tabs[6]:
                                               Explosivo=("explosivo", "first"), kg=("kg", "sum"))
         st.dataframe(zt.round(2), width="stretch")
     cols = ["id", "zona", "x", "y", "X0", "Y0", "Z0", "ux", "uy", "uz", "L", "B", "S", "explosivo", "n_cart", "kg"] + \
-        (["alcance"] if "alcance" in H else [])
+        (["alcance"] if "alcance" in H else []) + (["dominio"] if "dominio" in H else []) + \
+        (["disparo"] if "disparo" in H else [])
     st.dataframe(H[cols].round(3), hide_index=True, width="stretch")
     d1c, d2c, d3c = st.columns(3)
     d1c.download_button("Taladros (CSV)", H[cols].to_csv(index=False).encode("utf-8"), "taladros.csv", "text/csv")
@@ -1191,7 +1295,8 @@ with tabs[6]:
                 opt_d = dict(classic=classic, qmax=max(float(qmax), float(q_unit.max()) + 1e-6), nmax=int(nmax),
                              cut_single=cut_single, method="Por filas" if prod else "Heurística", time_limit=tl,
                              link=link, carpio_gap=carpio_gap, simultaneous=res.simultaneous if sim_on else set())
-                seq_pdf, _ = sq.run_sequencing(H, res.sources, opt_d, system, cfg, rock.RMR)
+                seq_pdf, _ = sq.run_sequencing_blasts(H, res.sources, opt_d, system, cfg, rock.RMR,
+                                                      (res.p.get("selective") or {}).get("sources"))
             except Exception:  # noqa: BLE001
                 seq_pdf = None
         with st.spinner("Generando el PDF…"):

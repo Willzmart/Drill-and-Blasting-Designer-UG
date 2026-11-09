@@ -282,3 +282,25 @@ def run_sequencing(holes, sources, opt, system, cfg, RMR=50):
     info.update(method=method, link=link, n_periods=int(out.periodo.max()), heur_periods=int(period_h.max()),
                 gap_ms=gap)
     return out, info
+
+
+def run_sequencing_blasts(holes, sources, opt, system, cfg, RMR=50, blast_sources=None):
+    """Voladura en varias pegas (columna "disparo", p. ej. voladura selectiva): cada disparo se secuencia por
+    separado con su propia cara libre (el disparo 1 con los vacíos del cuele; los siguientes con el vacío que
+    dejó el anterior). Los periodos se numeran de corrido; los tiempos (t_ms) empiezan de nuevo en cada pega."""
+    if "disparo" not in holes or holes.disparo.nunique() < 2:
+        return run_sequencing(holes, sources, opt, system, cfg, RMR)
+    parts, info, off = [], {}, 0
+    for k in sorted(holes.disparo.unique()):
+        hk = holes[holes.disparo == k]
+        src = sources if k == 1 else (blast_sources or {}).get(int(k), sources)
+        s, inf = run_sequencing(hk, src, opt, system, cfg, RMR)
+        s["periodo"] = s["periodo"] + off
+        off = int(s.periodo.max())
+        s["disparo"] = int(k)
+        parts.append(s)
+        info = inf if not info else info
+    out = pd.concat(parts, ignore_index=True)
+    out["orden"] = np.arange(1, len(out) + 1)
+    info = dict(info, n_periods=off, method=info["method"] + f" — {holes.disparo.nunique()} disparos por separado")
+    return out, info
